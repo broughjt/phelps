@@ -1,0 +1,34 @@
+[package]
+name = "phelps"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = "1.10.1"
+clap = { version = "4.5.47", features = ["derive"] }
+directories = "6.0.0"
+flate2 = "1.1.2"
+http = "1.3.1"
+http-body = "1.0.1"
+http-body-util = "0.1.3"
+hyper = { version = "1.7.0", features = [ "client" ] }
+hyper-rustls = { version = "0.27.7", features = ["http2"] }
+hyper-util = { version = "0.1.16", features = ["client-legacy", "http1", "http2"] }
+notify = "8.2.0"
+once_cell = "1.21.3"
+parking_lot = "0.12.4"
+pin-project = "1.1.10"
+serde = "1.0.219"
+serde_derive = "1.0.219"
+serde_json = "1.0.143"
+tar = "0.4.44"
+tempfile = "3.21.0"
+thiserror = "2.0.16"
+time = "0.3.43"
+tokio = { version = "1.47.1", features = ["rt-multi-thread"] }
+toml = "0.9.5"
+tower-async = "0.2.0"
+typst = { git = "https://github.com/broughjt/typst.git", branch = "math-hack" }
+typst-html = { git = "https://github.com/broughjt/typst.git", branch = "math-hack" }
+typst-kit = { git = "https://github.com/broughjt/typst.git", branch = "math-hack", default-features = false, features = ["fonts"] }
+walkdir = "2.5.0"

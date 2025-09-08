@@ -1,0 +1,335 @@
+use std::{
+    collections::HashMap,
+    fs, mem,
+    path::{Path, PathBuf},
+};
+
+use bytes::Buf;
+use parking_lot::Mutex;
+use thiserror::Error;
+use time::{UtcDateTime, UtcOffset};
+use typst::{
+    diag::{FileError, FileResult, PackageError},
+    foundations::{Bytes, Datetime},
+    syntax::{FileId, Source, VirtualPath},
+    text::{Font, FontBook},
+    utils::LazyHash,
+    Feature, Features, Library, LibraryExt, World,
+};
+use typst_kit::fonts::{FontSearcher, FontSlot};
+
+use crate::package::{PackageService, PackageStorage};
+
+pub struct Resources<S> {
+    root: PathBuf,
+    library: LazyHash<Library>,
+    book: LazyHash<FontBook>,
+    fonts: Vec<FontSlot>,
+    slots: Mutex<HashMap<FileId, FileSlot>>,
+    package_storage: PackageStorage<S>,
+}
+
+impl<S> Resources<S> {
+    pub fn new(root: PathBuf, package_storage: PackageStorage<S>) -> Self {
+        let fonts = FontSearcher::new().include_system_fonts(true).search();
+        let library = Library::builder()
+            .with_features(Features::from_iter([Feature::Html]))
+            .build();
+
+        Self {
+            root,
+            library: LazyHash::new(library),
+            book: LazyHash::new(fonts.book),
+            fonts: fonts.fonts,
+            slots: Mutex::new(HashMap::default()),
+            package_storage,
+        }
+    }
+
+    // pub fn dependencies(&mut self) -> impl Iterator<Item = PathBuf> + '_ {
+    //     self.slots
+    //         .get_mut()
+    //         .values()
+    //         .filter(|slot| slot.accessed())
+    //         .filter_map(|slot| system_path(&self.root, slot.id, &self.package_storage).ok())
+    // }
+
+    pub fn reset(&mut self) {
+        // #[allow(clippy::iter_over_hash_type, reason = "order does not matter")]
+        for slot in self.slots.get_mut().values_mut() {
+            slot.reset();
+        }
+    }
+}
+
+impl<S> Resources<S>
+where
+    S: PackageService,
+    PackageError: From<S::GetIndexServiceError>,
+    PackageError: From<S::GetPackageServiceError>,
+    S::GetPackageBuffer: Buf,
+{
+    pub fn dependencies(&mut self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.slots
+            .get_mut()
+            .values()
+            .filter(|slot| slot.accessed())
+            .filter_map(|slot| system_path(&self.root, slot.id, &self.package_storage).ok())
+    }
+}
+
+struct State {
+    main_id: FileId,
+    time: UtcDateTime,
+}
+
+impl State {
+    pub fn new(main_id: FileId, time: UtcDateTime) -> Self {
+        Self { main_id, time }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum SystemWorldCreationError {
+    #[error("path outside project root")]
+    PathOutsideRoot,
+}
+
+pub struct SystemWorld<'a, S> {
+    resources: &'a Resources<S>,
+    state: State,
+}
+
+impl<'a, S> SystemWorld<'a, S> {
+    pub fn with_path(
+        resources: &'a Resources<S>,
+        path: &Path,
+    ) -> Result<Self, SystemWorldCreationError> {
+        let virtual_path = VirtualPath::within_root(path, &resources.root)
+            .ok_or(SystemWorldCreationError::PathOutsideRoot)?;
+        let main_id = FileId::new(None, virtual_path);
+        let state = State::new(main_id, UtcDateTime::now());
+
+        Ok(SystemWorld { resources, state })
+    }
+}
+
+impl<'a, S> World for SystemWorld<'a, S>
+where
+    S: Send + Sync,
+    S: PackageService,
+    PackageError: From<S::GetIndexServiceError>,
+    PackageError: From<S::GetPackageServiceError>,
+    S::GetPackageBuffer: Buf,
+{
+    fn library(&self) -> &LazyHash<Library> {
+        &self.resources.library
+    }
+
+    fn book(&self) -> &LazyHash<FontBook> {
+        &self.resources.book
+    }
+
+    fn main(&self) -> FileId {
+        self.state.main_id
+    }
+
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        let mut slots = self.resources.slots.lock();
+        let slot = slots.entry(id).or_insert_with(|| FileSlot::new(id));
+
+        slot.source(&self.resources.root, id, &self.resources.package_storage)
+    }
+
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        let mut slots = self.resources.slots.lock();
+        let slot = slots.entry(id).or_insert_with(|| FileSlot::new(id));
+
+        slot.file(&self.resources.root, id, &self.resources.package_storage)
+    }
+
+    fn font(&self, index: usize) -> Option<Font> {
+        self.resources.fonts.get(index)?.get()
+    }
+
+    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
+        let offset = UtcOffset::from_hms(offset.unwrap_or(0).try_into().ok()?, 0, 0).ok()?;
+        let time = self.state.time.checked_to_offset(offset)?;
+
+        Some(Datetime::Date(time.date()))
+    }
+}
+
+struct FileSlot {
+    id: FileId,
+    source: SlotCell<Source>,
+    file: SlotCell<Bytes>,
+}
+
+impl FileSlot {
+    fn new(id: FileId) -> Self {
+        Self {
+            id,
+            file: SlotCell::new(),
+            source: SlotCell::new(),
+        }
+    }
+
+    fn accessed(&self) -> bool {
+        self.source.accessed() || self.file.accessed()
+    }
+
+    fn reset(&mut self) {
+        self.source.reset();
+        self.file.reset();
+    }
+
+    fn source<S>(
+        &mut self,
+        root: &Path,
+        file_id: FileId,
+        package_storage: &PackageStorage<S>,
+    ) -> FileResult<Source>
+    where
+        S: PackageService,
+        PackageError: From<S::GetIndexServiceError>,
+        PackageError: From<S::GetPackageServiceError>,
+        S::GetPackageBuffer: Buf,
+    {
+        self.source.get_or_init(
+            || read(root, file_id, package_storage),
+            |data, prev| {
+                let text = decode_utf8(&data)?;
+                if let Some(mut prev) = prev {
+                    prev.replace(text);
+                    Ok(prev)
+                } else {
+                    Ok(Source::new(self.id, text.into()))
+                }
+            },
+        )
+    }
+
+    fn file<S>(
+        &mut self,
+        root: &Path,
+        file_id: FileId,
+        package_storage: &PackageStorage<S>,
+    ) -> FileResult<Bytes>
+    where
+        S: PackageService,
+        PackageError: From<S::GetIndexServiceError>,
+        PackageError: From<S::GetPackageServiceError>,
+        S::GetPackageBuffer: Buf,
+    {
+        self.file.get_or_init(
+            || read(root, file_id, package_storage),
+            |data, _| Ok(Bytes::new(data)),
+        )
+    }
+}
+
+struct SlotCell<T> {
+    data: Option<FileResult<T>>,
+    fingerprint: u128,
+    accessed: bool,
+}
+
+impl<T: Clone> SlotCell<T> {
+    fn new() -> Self {
+        Self {
+            data: None,
+            fingerprint: 0,
+            accessed: false,
+        }
+    }
+
+    fn accessed(&self) -> bool {
+        self.accessed
+    }
+
+    fn reset(&mut self) {
+        self.accessed = false;
+    }
+
+    // TODO: unused?
+    // fn get(&self) -> Option<&FileResult<T>> {
+    //     self.data.as_ref()
+    // }
+
+    fn get_or_init(
+        &mut self,
+        load: impl FnOnce() -> FileResult<Vec<u8>>,
+        f: impl FnOnce(Vec<u8>, Option<T>) -> FileResult<T>,
+    ) -> FileResult<T> {
+        // If we accessed the file already in this compilation, retrieve it.
+        if mem::replace(&mut self.accessed, true)
+            && let Some(data) = &self.data
+        {
+            return data.clone();
+        }
+
+        // Read and hash the file.
+        let result = load();
+        let fingerprint = typst::utils::hash128(&result);
+
+        // If the file contents didn't change, yield the old processed data.
+        if mem::replace(&mut self.fingerprint, fingerprint) == fingerprint
+            && let Some(data) = &self.data
+        {
+            return data.clone();
+        }
+
+        let previous = self.data.take().and_then(Result::ok);
+        let value = result.and_then(|data| f(data, previous));
+        self.data = Some(value.clone());
+
+        value
+    }
+}
+
+fn system_path<S>(
+    root: &Path,
+    id: FileId,
+    package_storage: &PackageStorage<S>,
+) -> FileResult<PathBuf>
+where
+    S: PackageService,
+    PackageError: From<S::GetIndexServiceError>,
+    PackageError: From<S::GetPackageServiceError>,
+    S::GetPackageBuffer: Buf,
+{
+    let buffer: PathBuf;
+    let mut root = root;
+    if let Some(specification) = id.package() {
+        buffer = package_storage.prepare_package(specification)?;
+
+        root = &buffer;
+    }
+
+    id.vpath().resolve(root).ok_or(FileError::AccessDenied)
+}
+
+fn read<S>(root: &Path, id: FileId, package_storage: &PackageStorage<S>) -> FileResult<Vec<u8>>
+where
+    S: PackageService,
+    PackageError: From<S::GetIndexServiceError>,
+    PackageError: From<S::GetPackageServiceError>,
+    S::GetPackageBuffer: Buf,
+{
+    let path = system_path(root, id, package_storage)?;
+    let on_error = |e| FileError::from_io(e, &path);
+
+    if fs::metadata(&path).map_err(on_error)?.is_dir() {
+        Err(FileError::IsDirectory)
+    } else {
+        fs::read(&path).map_err(on_error)
+    }
+}
+
+fn decode_utf8(buf: &[u8]) -> FileResult<&str> {
+    // Remove UTF-8 BOM.
+    Ok(std::str::from_utf8(
+        buf.strip_prefix(b"\xef\xbb\xbf").unwrap_or(buf),
+    )?)
+}
