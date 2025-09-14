@@ -1,7 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs, mem,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use bytes::Buf;
@@ -14,23 +15,22 @@ use typst::{
     syntax::{FileId, Source, VirtualPath},
     text::{Font, FontBook},
     utils::LazyHash,
-    Feature, Features, Library, LibraryExt, World,
+    Feature, Features, Library, World
 };
 use typst_kit::fonts::{FontSearcher, FontSlot};
 
 use crate::package::{PackageService, PackageStorage};
 
-pub struct Resources<S> {
+#[derive(Debug)]
+pub struct Resources {
     root: PathBuf,
     library: LazyHash<Library>,
     book: LazyHash<FontBook>,
     fonts: Vec<FontSlot>,
-    slots: Mutex<HashMap<FileId, FileSlot>>,
-    package_storage: PackageStorage<S>,
 }
 
-impl<S> Resources<S> {
-    pub fn new(root: PathBuf, package_storage: PackageStorage<S>) -> Self {
+impl Resources {
+    pub fn new(root: PathBuf) -> Self {
         let fonts = FontSearcher::new().include_system_fonts(true).search();
         let library = Library::builder()
             .with_features(Features::from_iter([Feature::Html]))
@@ -41,40 +41,7 @@ impl<S> Resources<S> {
             library: LazyHash::new(library),
             book: LazyHash::new(fonts.book),
             fonts: fonts.fonts,
-            slots: Mutex::new(HashMap::default()),
-            package_storage,
         }
-    }
-
-    // pub fn dependencies(&mut self) -> impl Iterator<Item = PathBuf> + '_ {
-    //     self.slots
-    //         .get_mut()
-    //         .values()
-    //         .filter(|slot| slot.accessed())
-    //         .filter_map(|slot| system_path(&self.root, slot.id, &self.package_storage).ok())
-    // }
-
-    pub fn reset(&mut self) {
-        // #[allow(clippy::iter_over_hash_type, reason = "order does not matter")]
-        for slot in self.slots.get_mut().values_mut() {
-            slot.reset();
-        }
-    }
-}
-
-impl<S> Resources<S>
-where
-    S: PackageService,
-    PackageError: From<S::GetIndexServiceError>,
-    PackageError: From<S::GetPackageServiceError>,
-    S::GetPackageBuffer: Buf,
-{
-    pub fn dependencies(&mut self) -> impl Iterator<Item = PathBuf> + '_ {
-        self.slots
-            .get_mut()
-            .values()
-            .filter(|slot| slot.accessed())
-            .filter_map(|slot| system_path(&self.root, slot.id, &self.package_storage).ok())
     }
 }
 
@@ -95,26 +62,42 @@ pub enum SystemWorldCreationError {
     PathOutsideRoot,
 }
 
-pub struct SystemWorld<'a, S> {
-    resources: &'a Resources<S>,
+pub struct SystemWorld<S> {
+    resources: Arc<Resources>,
+    package_storage: PackageStorage<S>,
+    slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
     state: State,
+    dependencies: Arc<Mutex<HashSet<FileId>>>,
 }
 
-impl<'a, S> SystemWorld<'a, S> {
-    pub fn with_path(
-        resources: &'a Resources<S>,
+impl<S> SystemWorld<S> {
+    pub fn new(
+        resources: Arc<Resources>,
+        package_storage: PackageStorage<S>,
+        slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
         path: &Path,
     ) -> Result<Self, SystemWorldCreationError> {
         let virtual_path = VirtualPath::within_root(path, &resources.root)
             .ok_or(SystemWorldCreationError::PathOutsideRoot)?;
         let main_id = FileId::new(None, virtual_path);
         let state = State::new(main_id, UtcDateTime::now());
+        let dependencies = Arc::new(Mutex::new(HashSet::new()));
 
-        Ok(SystemWorld { resources, state })
+        Ok(SystemWorld {
+            resources,
+            package_storage,
+            slots,
+            state,
+            dependencies,
+        })
+    }
+
+    pub fn dependencies(&self) -> Arc<Mutex<HashSet<FileId>>> {
+        self.dependencies.clone()
     }
 }
 
-impl<'a, S> World for SystemWorld<'a, S>
+impl<S> World for SystemWorld<S>
 where
     S: Send + Sync,
     S: PackageService,
@@ -135,17 +118,21 @@ where
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        let mut slots = self.resources.slots.lock();
+        self.dependencies.lock().insert(id);
+
+        let mut slots = self.slots.lock();
         let slot = slots.entry(id).or_insert_with(|| FileSlot::new(id));
 
-        slot.source(&self.resources.root, id, &self.resources.package_storage)
+        slot.source(&self.resources.root, id, &self.package_storage)
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        let mut slots = self.resources.slots.lock();
+        self.dependencies.lock().insert(id);
+
+        let mut slots = self.slots.lock();
         let slot = slots.entry(id).or_insert_with(|| FileSlot::new(id));
 
-        slot.file(&self.resources.root, id, &self.resources.package_storage)
+        slot.file(&self.resources.root, id, &self.package_storage)
     }
 
     fn font(&self, index: usize) -> Option<Font> {
@@ -160,14 +147,14 @@ where
     }
 }
 
-struct FileSlot {
+pub struct FileSlot {
     id: FileId,
     source: SlotCell<Source>,
     file: SlotCell<Bytes>,
 }
 
 impl FileSlot {
-    fn new(id: FileId) -> Self {
+    pub fn new(id: FileId) -> Self {
         Self {
             id,
             file: SlotCell::new(),
@@ -175,16 +162,16 @@ impl FileSlot {
         }
     }
 
-    fn accessed(&self) -> bool {
+    pub fn accessed(&self) -> bool {
         self.source.accessed() || self.file.accessed()
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.source.reset();
         self.file.reset();
     }
 
-    fn source<S>(
+    pub fn source<S>(
         &mut self,
         root: &Path,
         file_id: FileId,
@@ -198,11 +185,12 @@ impl FileSlot {
     {
         self.source.get_or_init(
             || read(root, file_id, package_storage),
-            |data, prev| {
+            |data, previous| {
                 let text = decode_utf8(&data)?;
-                if let Some(mut prev) = prev {
-                    prev.replace(text);
-                    Ok(prev)
+                if let Some(mut previous) = previous {
+                    previous.replace(text);
+
+                    Ok(previous)
                 } else {
                     Ok(Source::new(self.id, text.into()))
                 }
@@ -210,7 +198,7 @@ impl FileSlot {
         )
     }
 
-    fn file<S>(
+    pub fn file<S>(
         &mut self,
         root: &Path,
         file_id: FileId,

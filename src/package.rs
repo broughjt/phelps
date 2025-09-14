@@ -1,4 +1,4 @@
-use std::{fmt::Debug, fs, io, path::PathBuf};
+use std::{fmt::Debug, fs, io, path::PathBuf, sync::Arc};
 
 use bytes::{Buf, Bytes};
 use http::{Method, StatusCode, Uri, uri::InvalidUri};
@@ -22,7 +22,7 @@ pub const DEFAULT_REGISTRY: &str = "https://packages.typst.org";
 pub const DEFAULT_NAMESPACE: &str = "preview";
 pub const INDEX_URL: &str = "https://packages.typst.org/preview/index.json";
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Package {
     pub authors: Vec<String>,
     #[serde(default)]
@@ -43,6 +43,7 @@ pub struct Package {
     pub version: String,
 }
 
+#[derive(Clone)]
 pub struct HttpWrapper<S>(pub S);
 
 pub struct GetIndexRequest;
@@ -182,8 +183,12 @@ pub enum GetPackageServiceError<E1, E2> {
     UnexpectedResponse(http::response::Parts, Bytes),
 }
 
-impl From<GetPackageServiceError<hyper_util::client::legacy::Error, hyper::Error>> for PackageError {
-    fn from(error: GetPackageServiceError<hyper_util::client::legacy::Error, hyper::Error>) -> Self {
+impl From<GetPackageServiceError<hyper_util::client::legacy::Error, hyper::Error>>
+    for PackageError
+{
+    fn from(
+        error: GetPackageServiceError<hyper_util::client::legacy::Error, hyper::Error>,
+    ) -> Self {
         PackageError::NetworkFailed(Some(eco_format!("{}", error)))
     }
 }
@@ -281,6 +286,7 @@ where
     }
 }
 
+#[derive(Clone)]
 pub struct ClientWrapper<C, B>(pub Client<C, B>);
 
 impl<C, B> Service<http::Request<B>> for ClientWrapper<C, B>
@@ -301,16 +307,30 @@ where
     }
 }
 
-impl From<GetIndexServiceError<hyper_util::client::legacy::Error, hyper::Error, serde_json::Error>> for PackageError {
-    fn from(error: GetIndexServiceError<hyper_util::client::legacy::Error, hyper::Error, serde_json::Error>) -> Self {
+impl From<GetIndexServiceError<hyper_util::client::legacy::Error, hyper::Error, serde_json::Error>>
+    for PackageError
+{
+    fn from(
+        error: GetIndexServiceError<
+            hyper_util::client::legacy::Error,
+            hyper::Error,
+            serde_json::Error,
+        >,
+    ) -> Self {
         PackageError::NetworkFailed(Some(eco_format!("{error}")))
     }
 }
 
-pub struct PackageStorage<S> {
+#[derive(Clone, Debug)]
+struct PackageStorageState {
     cache_directory: PathBuf,
     data_directory: PathBuf,
     index: OnceCell<Vec<Package>>,
+}
+
+#[derive(Clone)]
+pub struct PackageStorage<S> {
+    state: Arc<PackageStorageState>,
     handle: Handle,
     service: S,
 }
@@ -329,16 +349,19 @@ where
         service: S,
     ) -> Self {
         Self {
-            cache_directory,
-            data_directory,
-            index: OnceCell::new(),
+            state: Arc::new(PackageStorageState {
+                cache_directory,
+                data_directory,
+                index: OnceCell::new(),
+            }),
             handle,
             service,
         }
     }
 
     pub fn get_index(&self) -> Result<&[Package], PackageError> {
-        self.index
+        self.state
+            .index
             .get_or_try_init(|| {
                 self.handle
                     .block_on(self.service.get_index())
@@ -352,7 +375,7 @@ where
             .handle
             .block_on(self.service.get_package(specification.clone()))??
             .reader();
-        let package_directory = self.cache_directory.join(format!(
+        let package_directory = self.state.cache_directory.join(format!(
             "{}/{}/{}",
             specification.namespace, specification.name, specification.version
         ));
@@ -365,10 +388,13 @@ where
             .unpack(&temporary_directory)
             .map_err(|error| PackageError::MalformedArchive(Some(eco_format!("{error}"))))?;
 
+        fs::create_dir_all(&package_directory)
+            .map_err(|e| PackageError::Other(Some(eco_format!("{}", e))))?;
+
         match fs::rename(&temporary_directory, &package_directory) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(()),
-            Err(error) => Err(PackageError::Other(Some(eco_format!("{error}")))),
+            Err(error) => Err(PackageError::Other(Some(eco_format!("{error}"))))
         }
     }
 
@@ -378,12 +404,12 @@ where
             specification.namespace, specification.name, specification.version
         );
 
-        let directory = self.data_directory.join(&subdirectory);
+        let directory = self.state.data_directory.join(&subdirectory);
         if directory.exists() {
             return Ok(directory);
         }
 
-        let directory = self.cache_directory.join(&subdirectory);
+        let directory = self.state.cache_directory.join(&subdirectory);
         if directory.exists() {
             return Ok(directory);
         }
