@@ -1,8 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
-    fs, mem,
-    path::{Path, PathBuf},
-    sync::Arc,
+    collections::{HashMap, HashSet}, fs, mem, ops::DerefMut, path::{Path, PathBuf}, sync::Arc
 };
 
 use bytes::Buf;
@@ -12,7 +9,7 @@ use time::{UtcDateTime, UtcOffset};
 use typst::{
     diag::{FileError, FileResult, PackageError},
     foundations::{Bytes, Datetime},
-    syntax::{FileId, Source, VirtualPath},
+    syntax::{FileId, Source},
     text::{Font, FontBook},
     utils::LazyHash,
     Feature, Features, Library, World
@@ -75,25 +72,31 @@ impl<S> SystemWorld<S> {
         resources: Arc<Resources>,
         package_storage: PackageStorage<S>,
         slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
-        path: &Path,
-    ) -> Result<Self, SystemWorldCreationError> {
-        let virtual_path = VirtualPath::within_root(path, &resources.root)
-            .ok_or(SystemWorldCreationError::PathOutsideRoot)?;
-        let main_id = FileId::new(None, virtual_path);
+        main_id: FileId
+    ) -> Self {
+        // let virtual_path = VirtualPath::within_root(path, &resources.root)
+        //     .ok_or(SystemWorldCreationError::PathOutsideRoot)?;
+        // let main_id = FileId::new(None, virtual_path);
         let state = State::new(main_id, UtcDateTime::now());
         let dependencies = Arc::new(Mutex::new(HashSet::new()));
 
-        Ok(SystemWorld {
+        SystemWorld {
             resources,
             package_storage,
             slots,
             state,
             dependencies,
-        })
+        }
     }
 
     pub fn dependencies(&self) -> Arc<Mutex<HashSet<FileId>>> {
         self.dependencies.clone()
+    }
+
+    pub fn into_dependencies(self) -> HashSet<FileId> {
+        let mut guard = self.dependencies.lock();
+
+        mem::take(guard.deref_mut())
     }
 }
 

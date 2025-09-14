@@ -7,7 +7,7 @@ use thiserror::Error;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
-pub struct Cli {
+pub struct Arguments {
     #[command(subcommand)]
     pub command: Commands,
 }
