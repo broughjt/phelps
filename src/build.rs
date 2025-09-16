@@ -1,11 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
-    path::Path,
-    sync::Arc,
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc},
+    time::Duration,
 };
 
 use bytes::Buf;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use thiserror::Error;
 use typst::{
@@ -16,9 +18,10 @@ use typst::{
 };
 
 use crate::{
-    package::{PackageService, PackageStorage},
-    system_world::{FileSlot, Resources, SystemWorld},
+    config::Config, package::{PackageService, PackageStorage}, system_world::{FileSlot, Resources, SystemWorld}
 };
+
+const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 // TODO: We shouldn't hold this in memory, we should run build for the effect of producing an output in the build directory
 pub struct BuildOutput {
@@ -91,4 +94,63 @@ where
     };
 
     Ok(warned)
+}
+
+pub fn watch<S>(
+    resources: Arc<Resources>,
+    package_storage: PackageStorage<S>,
+    _slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
+    paths: Vec<PathBuf>,
+    config: &Config
+) -> Result<Warned<HashSet<FileId>>, BuildError>
+where
+    S: Send + Sync + Clone,
+    S: PackageService,
+    PackageError: From<S::GetIndexServiceError>,
+    PackageError: From<S::GetPackageServiceError>,
+    S::GetPackageBuffer: Buf,
+{
+    let (sender, receiver) = mpsc::channel();
+
+    let watch_config = notify::Config::default().with_poll_interval(POLL_INTERVAL);
+    // TODO:
+    let mut watcher = RecommendedWatcher::new(sender, watch_config).unwrap();
+
+    // TODO:
+    watcher.watch(&config.notes_subdirectory, RecursiveMode::Recursive).unwrap();
+
+    for path in paths {
+        let slots = Arc::new(Mutex::new(HashMap::new()));
+        let _result = build(
+            resources.clone(),
+            package_storage.clone(),
+            slots,
+            &path,
+            &config.project_directory,
+            &config.build_subdirectory,
+        );
+    }
+
+    loop {
+        // TODO:
+        let event = receiver.recv().unwrap().unwrap();
+
+        if event.kind.is_create() || event.kind.is_modify() {
+            if event.paths.len() == 1 {
+                if event.paths[0].extension().is_some_and(|e| e == "typ") {
+                    let slots = Arc::new(Mutex::new(HashMap::new()));
+                    let _result = build(
+                        resources.clone(),
+                        package_storage.clone(),
+                        slots,
+                        &event.paths[0],
+                        &config.project_directory,
+                        &config.build_subdirectory
+                    );
+                }
+            } else {
+                unimplemented!()
+            }
+        }
+    }
 }

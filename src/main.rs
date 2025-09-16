@@ -9,7 +9,7 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use parking_lot::Mutex;
-use phelps::build::build;
+use phelps::build::{build, watch};
 use phelps::system_world::{FileSlot, Resources};
 use tokio::runtime::Runtime;
 use typst::syntax::FileId;
@@ -68,7 +68,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match arguments.command {
         Commands::Watch => {
-            unimplemented!();
+            watch(
+                resources,
+                package_storage,
+                slots,
+                paths,
+                &config
+            ).unwrap();
         }
         Commands::Compile => {
             for path in paths {
