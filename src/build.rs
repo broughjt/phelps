@@ -7,8 +7,9 @@ use std::{
 };
 
 use bytes::Buf;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
+use scraper::Html;
 use thiserror::Error;
 use typst::{
     diag::{PackageError, SourceDiagnostic, Warned},
@@ -18,7 +19,9 @@ use typst::{
 };
 
 use crate::{
-    config::Config, package::{PackageService, PackageStorage}, system_world::{FileSlot, Resources, SystemWorld}
+    config::Config,
+    package::{PackageService, PackageStorage},
+    system_world::{FileSlot, Resources, SystemWorld},
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
@@ -70,7 +73,19 @@ where
     } = typst::compile::<HtmlDocument>(&world);
     let document = result.map_err(BuildError::Compile)?;
 
-    let output = typst_html::html(&document).map_err(BuildError::Export)?;
+    let output = {
+        let output = typst_html::html(&document).map_err(BuildError::Export)?;
+        let document = Html::parse_document(&output);
+        // TODO:
+        if !document.errors.is_empty() {
+            for error in document.errors {
+                println!("{:?}", error);
+            }
+            panic!("Unexpected html parse errors");
+        }
+
+        document.html()
+    };
 
     let file_stem = main_id
         .vpath()
@@ -101,8 +116,8 @@ pub fn watch<S>(
     package_storage: PackageStorage<S>,
     _slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
     paths: Vec<PathBuf>,
-    config: &Config
-) -> Result<Warned<HashSet<FileId>>, BuildError>
+    config: &Config,
+) -> Result<(), BuildError>
 where
     S: Send + Sync + Clone,
     S: PackageService,
@@ -117,7 +132,9 @@ where
     let mut watcher = RecommendedWatcher::new(sender, watch_config).unwrap();
 
     // TODO:
-    watcher.watch(&config.notes_subdirectory, RecursiveMode::Recursive).unwrap();
+    watcher
+        .watch(&config.notes_subdirectory, RecursiveMode::Recursive)
+        .unwrap();
 
     for path in paths {
         let slots = Arc::new(Mutex::new(HashMap::new()));
@@ -145,7 +162,7 @@ where
                         slots,
                         &event.paths[0],
                         &config.project_directory,
-                        &config.build_subdirectory
+                        &config.build_subdirectory,
                     );
                 }
             } else {
