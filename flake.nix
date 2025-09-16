@@ -16,6 +16,7 @@
             clippy
             rust-analyzer
             rustfmt
+            bun
           ];
         };
       });
