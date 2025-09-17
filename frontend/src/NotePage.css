@@ -1,0 +1,59 @@
+#root {
+    font-family: sans-serif;
+}
+
+.layout {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    /* max-width: 1200px; */
+    grid-template-areas:
+        "content"
+        "sidebar";
+    /* justify-content: center; */
+    /* gap: 2rem; */
+    /* padding: 2rem; */
+}
+
+article {
+    /* margin: auto; */
+    /* padding: 1em; */
+    /* max-width: 7.5in; */
+    /* width: 100%; */
+    font-family: 'Libertinus Serif Display', serif;
+    text-rendering: optimizeLegibility;
+    font-size: 20px;
+    grid-area: content;
+}
+
+aside {
+    grid-area: sidebar;
+
+}
+
+@media (width >= 1000px) {
+  .layout {
+    grid-template-columns: 1fr 800px 1fr;
+    grid-template-areas:
+      ".    content sidebar"
+      /* ".    content ad" */
+      /* "footer footer  footer"; */
+  }
+
+  article {
+      padding: 0 1in;
+  }
+}
+
+/* aside { */
+/*     width: 250px; */
+/* } */
+
+/* main > p { */
+/*     font-size: 20px; */
+/* } */
+
+
+/* aside { */
+/*     width: 250px; */
+/*     flex-shrink: 0; */
+/* } */

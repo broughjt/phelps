@@ -10,8 +10,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.7",
+    "@fontsource/libertinus-serif": "^5.2.1",
+    "@fontsource/libertinus-serif-display": "^5.2.1",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "wouter": "^3.7.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",
