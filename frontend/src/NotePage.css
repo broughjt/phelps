@@ -1,48 +1,69 @@
-#root {
-    font-family: sans-serif;
-}
+/* #root { */
+/*     font-family: sans-serif; */
+/* } */
 
+/* .layout { */
+/*     display: grid; */
+/*     grid-template-columns: 1fr auto; */
+/*     /\* max-width: 1200px; *\/ */
+/*     grid-template-areas: */
+/*         "content" */
+/*         "sidebar"; */
+/*     /\* justify-content: center; *\/ */
+/*     /\* gap: 2rem; *\/ */
+/*     /\* padding: 2rem; *\/ */
+/* } */
+
+/* Thalia version */
 .layout {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    /* max-width: 1200px; */
-    grid-template-areas:
-        "content"
-        "sidebar";
-    /* justify-content: center; */
-    /* gap: 2rem; */
-    /* padding: 2rem; */
+    display: flex;
+    justify-content: center;
 }
 
 article {
-    /* margin: auto; */
-    /* padding: 1em; */
-    /* max-width: 7.5in; */
-    /* width: 100%; */
-    font-family: 'Libertinus Serif Display', serif;
-    text-rendering: optimizeLegibility;
-    font-size: 20px;
-    grid-area: content;
+    max-width: 800px;
+    flex-grow: 1;
 }
 
 aside {
-    grid-area: sidebar;
-
+    flex-shrink: 1;
+    width: 256px;
+    min-width: 192px;
 }
 
-@media (width >= 1000px) {
-  .layout {
-    grid-template-columns: 1fr 800px 1fr;
-    grid-template-areas:
-      ".    content sidebar"
-      /* ".    content ad" */
-      /* "footer footer  footer"; */
-  }
-
-  article {
-      padding: 0 1in;
-  }
+.right-column {
+    flex-shrink: 4;
 }
+
+/* article { */
+/*     /\* margin: auto; *\/ */
+/*     /\* padding: 1em; *\/ */
+/*     /\* max-width: 7.5in; *\/ */
+/*     /\* width: 100%; *\/ */
+/*     font-family: 'Libertinus Serif Display', serif; */
+/*     text-rendering: optimizeLegibility; */
+/*     font-size: 20px; */
+/*     grid-area: content; */
+/* } */
+
+/* aside { */
+/*     grid-area: sidebar; */
+
+/* } */
+
+/* @media (width >= 1000px) { */
+/*   .layout { */
+/*     grid-template-columns: 1fr 800px 1fr; */
+/*     grid-template-areas: */
+/*       ".    content sidebar" */
+/*       /\* ".    content ad" *\/ */
+/*       /\* "footer footer  footer"; *\/ */
+/*   } */
+
+/*   article { */
+/*       padding: 0 1in; */
+/*   } */
+/* } */
 
 /* aside { */
 /*     width: 250px; */

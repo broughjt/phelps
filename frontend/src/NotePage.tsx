@@ -39,6 +39,7 @@ export default function NotePage() {
           <li>Backlink 3</li>
         </ul>
       </aside>
+      <div className="right-column"></div>
     </div>
   )
 }
