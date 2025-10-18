@@ -17,6 +17,7 @@
             rust-analyzer
             rustfmt
             bun
+            typescript-language-server
           ];
         };
       });

@@ -1,9 +1,14 @@
 use std::collections::HashMap;
 
-use petgraph::{graph::NodeIndex, stable_graph::{DefaultIx, StableGraph}, Direction};
+use petgraph::{
+    Direction,
+    graph::NodeIndex,
+    stable_graph::{DefaultIx, StableGraph},
+};
 use serde_derive::Serialize;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub const CONTENT1: &str = include_str!("../test1.html");
@@ -12,13 +17,13 @@ pub const CONTENT3: &str = include_str!("../test3.html");
 
 pub const BUFFER_SIZE: usize = 64;
 
-struct NotesActor {
+struct NotesActorState {
     links: StableGraph<Uuid, ()>,
     node_ids: HashMap<Uuid, NodeIndex<DefaultIx>>,
     titles: HashMap<Uuid, String>,
 }
 
-impl Default for NotesActor {
+impl Default for NotesActorState {
     fn default() -> Self {
         let uuid1 = Uuid::try_parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let uuid2 = Uuid::try_parse("550e8400-e29b-41d4-a716-446655440001").unwrap();
@@ -35,11 +40,7 @@ impl Default for NotesActor {
             (node3, node1),
         ]);
 
-        let node_ids = HashMap::from_iter([
-            (uuid1, node1),
-            (uuid2, node2),
-            (uuid3, node3),
-        ]);
+        let node_ids = HashMap::from_iter([(uuid1, node1), (uuid2, node2), (uuid3, node3)]);
 
         let titles = HashMap::from_iter([
             (uuid1, "Note 1".into()),
@@ -47,7 +48,11 @@ impl Default for NotesActor {
             (uuid3, "Note 3".into()),
         ]);
 
-        Self { links, node_ids, titles }
+        Self {
+            links,
+            node_ids,
+            titles,
+        }
     }
 }
 
@@ -80,47 +85,119 @@ pub struct NoteMetadata {
     backlinks: Vec<Uuid>,
 }
 
-impl Message<GetNoteContentRequest> for NotesActor {
+impl Message<GetNoteContentRequest> for NotesActorState {
     type Response = GetNoteContentResponse;
 
-    async fn handle(&mut self, GetNoteContentRequest { id }: GetNoteContentRequest) -> Self::Response {
+    async fn handle(
+        &mut self,
+        GetNoteContentRequest { id }: GetNoteContentRequest,
+    ) -> Self::Response {
         if id == Uuid::try_parse("550e8400-e29b-41d4-a716-446655440000").unwrap() {
-            GetNoteContentResponse { result: Ok(Some(CONTENT1.into())) }
+            GetNoteContentResponse {
+                result: Ok(Some(CONTENT1.into())),
+            }
         } else if id == Uuid::try_parse("550e8400-e29b-41d4-a716-446655440001").unwrap() {
-            GetNoteContentResponse { result: Ok(Some(CONTENT2.into())) }
+            GetNoteContentResponse {
+                result: Ok(Some(CONTENT2.into())),
+            }
         } else if id == Uuid::try_parse("550e8400-e29b-41d4-a716-446655440001").unwrap() {
-            GetNoteContentResponse { result: Ok(Some(CONTENT3.into())) }
+            GetNoteContentResponse {
+                result: Ok(Some(CONTENT3.into())),
+            }
         } else {
             GetNoteContentResponse { result: Ok(None) }
         }
     }
 }
 
-impl Message<GetNoteMetadataRequest> for NotesActor {
+impl Message<GetNoteMetadataRequest> for NotesActorState {
     type Response = GetNoteMetadataResponse;
 
-    async fn handle(&mut self, GetNoteMetadataRequest { id }: GetNoteMetadataRequest) -> Self::Response {
+    async fn handle(
+        &mut self,
+        GetNoteMetadataRequest { id }: GetNoteMetadataRequest,
+    ) -> Self::Response {
         let result = self.node_ids.get(&id).map(|i| {
             let title = self.titles[&id].clone();
-            let links = self.links.neighbors_directed(*i, Direction::Outgoing).map(|i| self.links[i]).collect();
-            let backlinks = self.links.neighbors_directed(*i, Direction::Incoming).map(|i| self.links[i]).collect();
+            let links = self
+                .links
+                .neighbors_directed(*i, Direction::Outgoing)
+                .map(|i| self.links[i])
+                .collect();
+            let backlinks = self
+                .links
+                .neighbors_directed(*i, Direction::Incoming)
+                .map(|i| self.links[i])
+                .collect();
 
-            NoteMetadata { title, links, backlinks }
+            NoteMetadata {
+                title,
+                links,
+                backlinks,
+            }
         });
 
         GetNoteMetadataResponse { result }
     }
 }
 
-
 enum NotesMessage {
-    GetNoteContent(GetNoteContentRequest, oneshot::Sender<GetNoteContentResponse>),
-    GetNoteMetadata(GetNoteMetadataRequest, oneshot::Sender<GetNoteMetadataResponse>)
+    GetNoteContent(
+        GetNoteContentRequest,
+        oneshot::Sender<GetNoteContentResponse>,
+    ),
+    GetNoteMetadata(
+        GetNoteMetadataRequest,
+        oneshot::Sender<GetNoteMetadataResponse>,
+    ),
+}
+
+pub struct NotesActor {
+    receiver: mpsc::Receiver<NotesMessage>,
+    state: NotesActorState,
+    cancel: CancellationToken,
+}
+
+impl NotesActor {
+    async fn handle(&mut self, message: NotesMessage) {
+        match message {
+            NotesMessage::GetNoteContent(request, sender) => {
+                let response = self.state.handle(request).await;
+                let _ = sender.send(response);
+            }
+            NotesMessage::GetNoteMetadata(request, sender) => {
+                let response = self.state.handle(request).await;
+                let _ = sender.send(response);
+            }
+        }
+    }
+
+    pub async fn run(mut self) {
+        loop {
+            tokio::select! {
+                option = self.receiver.recv() => if let Some(message) = option {
+                    self.handle(message).await;
+                } else {
+                    break
+                },
+                _ = self.cancel.cancelled() => {
+                    println!("Notes actor cancel");
+                    self.receiver.close();
+
+                    while let Some(message) = self.receiver.recv().await {
+                        self.handle(message).await;
+                    }
+
+                    break
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct NotesActorHandle {
-    sender: mpsc::Sender<NotesMessage>
+    sender: mpsc::Sender<NotesMessage>,
 }
 
 impl From<mpsc::Sender<NotesMessage>> for NotesActorHandle {
@@ -134,48 +211,73 @@ pub enum NotesActorHandleError {
     #[error("send error")]
     Send,
     #[error("receive error")]
-    Receive
+    Receive,
 }
 
 impl NotesActorHandle {
-    pub async fn get_note_content(&self, id: Uuid) -> Result<Result<Option<String>, ()>, NotesActorHandleError> {
+    pub async fn get_note_content(
+        &self,
+        id: Uuid,
+    ) -> Result<Result<Option<String>, ()>, NotesActorHandleError> {
         let (sender, receiver) = oneshot::channel();
         let message = NotesMessage::GetNoteContent(GetNoteContentRequest { id }, sender);
-        self.sender.send(message).await.map_err(|_| NotesActorHandleError::Send)?;
-        let GetNoteContentResponse { result } = receiver.await.map_err(|_| NotesActorHandleError::Receive)?;
+        self.sender
+            .send(message)
+            .await
+            .map_err(|_| NotesActorHandleError::Send)?;
+        let GetNoteContentResponse { result } =
+            receiver.await.map_err(|_| NotesActorHandleError::Receive)?;
 
         Ok(result)
     }
 
-    pub async fn get_note_metadata(&self, id: Uuid) -> Result<Option<NoteMetadata>, NotesActorHandleError> {
+    pub async fn get_note_metadata(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<NoteMetadata>, NotesActorHandleError> {
         let (sender, receiver) = oneshot::channel();
         let message = NotesMessage::GetNoteMetadata(GetNoteMetadataRequest { id }, sender);
-        self.sender.send(message).await.map_err(|_| NotesActorHandleError::Send)?;
-        let GetNoteMetadataResponse { result } = receiver.await.map_err(|_| NotesActorHandleError::Receive)?;
+        self.sender
+            .send(message)
+            .await
+            .map_err(|_| NotesActorHandleError::Send)?;
+        let GetNoteMetadataResponse { result } =
+            receiver.await.map_err(|_| NotesActorHandleError::Receive)?;
 
         Ok(result)
     }
 
-    pub fn spawn() -> NotesActorHandle {
-        let mut state = NotesActor::default();
-        let (sender, mut receiver) = mpsc::channel(BUFFER_SIZE);
+    // pub fn spawn(cancel: CancellationToken) -> NotesActorHandle {
+    //     let mut state = NotesActor::default();
+    //     let (sender, mut receiver) = mpsc::channel(BUFFER_SIZE);
 
-        // TODO: Take a shutdown signal
-        tokio::spawn(async move {
-            while let Some(message) = receiver.recv().await {
-                match message {
-                    NotesMessage::GetNoteContent(request, sender) => {
-                        let response = state.handle(request).await;
-                        let _ = sender.send(response);
-                    },
-                    NotesMessage::GetNoteMetadata(request, sender) => {
-                        let response = state.handle(request).await;
-                        let _ = sender.send(response);
-                    }
-                }
-            }
-        });
+    //     tokio::spawn(async move {
+    //         while let Some(message) = receiver.recv().await {
+    //             match message {
+    //                 NotesMessage::GetNoteContent(request, sender) => {
+    //                     let response = state.handle(request).await;
+    //                     let _ = sender.send(response);
+    //                 },
+    //                 NotesMessage::GetNoteMetadata(request, sender) => {
+    //                     let response = state.handle(request).await;
+    //                     let _ = sender.send(response);
+    //                 }
+    //             }
+    //         }
+    //     });
 
-        sender.into()
+    //     sender.into()
+    // }
+
+    pub fn build(cancel: CancellationToken) -> (NotesActorHandle, NotesActor) {
+        let (sender, receiver) = mpsc::channel(BUFFER_SIZE);
+        let actor = NotesActor {
+            state: Default::default(),
+            receiver,
+            cancel,
+        };
+        let handle = NotesActorHandle { sender };
+
+        (handle, actor)
     }
 }

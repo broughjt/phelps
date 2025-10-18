@@ -394,7 +394,7 @@ where
         match fs::rename(&temporary_directory, &package_directory) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(()),
-            Err(error) => Err(PackageError::Other(Some(eco_format!("{error}"))))
+            Err(error) => Err(PackageError::Other(Some(eco_format!("{error}")))),
         }
     }
 

@@ -29,8 +29,10 @@ tempfile = "3.21.0"
 thiserror = "2.0.16"
 time = "0.3.43"
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "net", "signal", "sync"] }
+tokio-util = { version = "0.7.16", features = ["rt"] }
 toml = "0.9.5"
 tower-async = "0.2.0"
+tower-http = { version = "0.6.6", features = ["cors"] }
 typst = "0.13.1"
 typst-html = "0.13.1"
 typst-kit = { version = "0.13.1", default-features = false, features = ["fonts", "embed-fonts"] }

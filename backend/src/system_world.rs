@@ -1,5 +1,9 @@
 use std::{
-    collections::{HashMap, HashSet}, fs, mem, ops::DerefMut, path::{Path, PathBuf}, sync::Arc
+    collections::{HashMap, HashSet},
+    fs, mem,
+    ops::DerefMut,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use bytes::Buf;
@@ -7,12 +11,12 @@ use parking_lot::Mutex;
 use thiserror::Error;
 use time::{UtcDateTime, UtcOffset};
 use typst::{
+    Feature, Features, Library, World,
     diag::{FileError, FileResult, PackageError},
     foundations::{Bytes, Datetime},
     syntax::{FileId, Source},
     text::{Font, FontBook},
     utils::LazyHash,
-    Feature, Features, Library, World
 };
 use typst_kit::fonts::{FontSearcher, FontSlot};
 
@@ -72,7 +76,7 @@ impl<S> SystemWorld<S> {
         resources: Arc<Resources>,
         package_storage: PackageStorage<S>,
         slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
-        main_id: FileId
+        main_id: FileId,
     ) -> Self {
         // let virtual_path = VirtualPath::within_root(path, &resources.root)
         //     .ok_or(SystemWorldCreationError::PathOutsideRoot)?;
