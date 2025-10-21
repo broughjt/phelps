@@ -125,7 +125,9 @@ where
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        self.dependencies.lock().insert(id);
+        if id != self.state.main_id {
+            self.dependencies.lock().insert(id);
+        }
 
         let mut slots = self.slots.lock();
         let slot = slots.entry(id).or_insert_with(|| FileSlot::new(id));
@@ -134,7 +136,9 @@ where
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        self.dependencies.lock().insert(id);
+        if id != self.state.main_id {
+            self.dependencies.lock().insert(id);
+        }
 
         let mut slots = self.slots.lock();
         let slot = slots.entry(id).or_insert_with(|| FileSlot::new(id));

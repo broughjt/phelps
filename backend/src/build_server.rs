@@ -1,17 +1,23 @@
 use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
-    mem
 };
 
 use bytes::Buf;
+use ego_tree::{NodeId, NodeRef, Tree};
 use http_body_util::Empty;
-use hyper_rustls::HttpsConnectorBuilder;
-use hyper_util::{client::legacy::Client, rt::TokioExecutor};
-use notify::{Error, Event, EventHandler, RecommendedWatcher, RecursiveMode, Watcher};
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::{
+    client::legacy::{Client, connect::HttpConnector},
+    rt::TokioExecutor,
+};
+use markup5ever::{LocalName, QualName, ns};
+use notify::{Error, Event, EventHandler, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
+use petgraph::{prelude::DiGraphMap, visit::Bfs, Direction};
 use scraper::{ElementRef, Html, Node, Selector};
 use tokio::{runtime::Handle, sync::mpsc};
 use tokio_util::sync::CancellationToken;
@@ -19,7 +25,6 @@ use typst::{
     Document,
     diag::{PackageError, SourceDiagnostic, Warned},
     ecow::EcoVec,
-    foundations::Element,
     html::HtmlDocument,
     model::HeadingElem,
     syntax::{FileId, VirtualPath},
@@ -41,11 +46,19 @@ impl EventHandler for MpscWrapper {
 }
 
 pub struct BuildServer {
-    receiver: mpsc::Receiver<Result<Event, Error>>,
     project_directory: PathBuf,
+    notes_subdirectory: PathBuf,
     build_subdirectory: PathBuf,
+    package_storage: PackageStorage<
+        HttpWrapper<ClientWrapper<HttpsConnector<HttpConnector>, Empty<hyper::body::Bytes>>>,
+    >,
+    resources: Arc<Resources>,
+    slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
+    is_source: HashSet<FileId>,
+    receiver: mpsc::Receiver<Result<Event, Error>>,
     watcher: RecommendedWatcher,
     cancel: CancellationToken,
+    graph: DiGraphMap<FileId, ()>,
 }
 
 impl BuildServer {
@@ -61,14 +74,6 @@ impl BuildServer {
         const BUFFER_SIZE: usize = 128;
         let (sender, receiver) = mpsc::channel(BUFFER_SIZE);
 
-        let paths = WalkDir::new(&notes_subdirectory)
-            .into_iter()
-            .map(|result| result.map(DirEntry::into_path))
-            .filter(|result| {
-                result
-                    .as_ref()
-                    .is_ok_and(|path| path.extension().is_some_and(|s| s == "typ"))
-            });
         let https = HttpsConnectorBuilder::new()
             .with_native_roots()?
             .https_or_http()
@@ -83,57 +88,196 @@ impl BuildServer {
         let package_storage =
             PackageStorage::new(cache_directory, data_directory, handle.clone(), service);
         let resources = Arc::new(Resources::new(project_directory.clone()));
+        let slots = Arc::new(Mutex::new(HashMap::new()));
 
-        for result in paths {
-            // TODO
-            let path = result.unwrap();
-            println!("{:?}", path);
-            let slots = Arc::new(Mutex::new(HashMap::new()));
+        let graph = DiGraphMap::new();
+        let is_source = HashSet::new();
 
-            build(
-                resources.clone(),
-                package_storage.clone(),
-                slots,
-                &path,
-                &project_directory,
-            );
-            // handle
-            //     .spawn_blocking(|| {
-            //         build(resources, package_storage, slots, path.clone(), project_directory.clone())
-            //     })
-            //     .await
-            //     .unwrap();
-        }
-        todo!();
-
-        let mut watcher = RecommendedWatcher::new(MpscWrapper(sender), Default::default())?;
-
-        watcher.watch(&project_directory, RecursiveMode::Recursive)?;
+        // TODO:
+        let watcher = RecommendedWatcher::new(MpscWrapper(sender), Default::default())?;
 
         Ok(Self {
             receiver,
             project_directory,
+            notes_subdirectory,
             build_subdirectory,
+            package_storage,
+            resources,
+            slots,
+            is_source,
             watcher,
             cancel,
+            graph,
         })
     }
 
-    pub async fn run(mut self) {
+    pub fn startup(&mut self) {
+        // TODO: Do async
+        if self.build_subdirectory.exists() {
+            // TODO:
+            fs::remove_dir_all(&self.build_subdirectory).unwrap();
+            // TODO:
+            fs::create_dir(&self.build_subdirectory).unwrap();
+        }
+
+        let paths = WalkDir::new(&self.notes_subdirectory)
+            .into_iter()
+            .filter_map(|result| {
+                result
+                    .map(DirEntry::into_path)
+                    .ok()
+                    .filter(|path| path.extension().is_some_and(|s| s == "typ"))
+            });
+
+        for path in paths {
+            let virtual_path = VirtualPath::within_root(&path, &self.project_directory).unwrap();
+            let id = FileId::new(None, virtual_path);
+
+            self.handle_create(id).unwrap(); // TODO
+        }
+
+        self.watcher
+            .watch(&self.project_directory, RecursiveMode::Recursive)
+            .unwrap(); // TODO
+    }
+
+    pub async fn run(self) {
+        // TODO: During this time, we are not listening for a cancel
+        // signal. Maybe it takes a long time and then we ignore the user's
+        // desire to end the program for a long time. That would suck. We should
+        // fix that, probably by selecting against the cancel signal here too.
+        let mut this = self;
+        let mut this = tokio::task::spawn_blocking(move || {
+            this.startup();
+
+            this
+        })
+            .await
+            .unwrap();
+
         loop {
             tokio::select! {
-                option = self.receiver.recv() => if let Some(event) = option {
-                    println!("{:?}", event);
+                option = this.receiver.recv() => if let Some(result) = option {
+                    if let Ok(event) = result {
+                        match event.kind {
+                            EventKind::Access(_) | EventKind::Any | EventKind::Other => (),
+                            EventKind::Create(_) => {
+                                assert_eq!(event.paths.len(), 1);
+
+                                let path = &event.paths[0];
+                                let virtual_path = VirtualPath::within_root(path, &this.project_directory).unwrap();
+                                let id = FileId::new(None, virtual_path);
+
+                                if id.package().is_none()
+                                    && path.extension().is_some_and(|e| e == "typ")
+                                    && path.strip_prefix(&this.notes_subdirectory).is_ok() {
+                                    this.handle_create(id).unwrap(); // TODO
+                                }
+                            },
+                            EventKind::Modify(_) => {
+                                assert_eq!(event.paths.len(), 1); // TODO
+
+                                let path = &event.paths[0];
+                                let virtual_path = VirtualPath::within_root(path, &this.project_directory).unwrap();
+                                let id = FileId::new(None, virtual_path);
+
+                                this.handle_modify(id).unwrap(); // TODO
+                            },
+                            EventKind::Remove(_) => {
+                                assert_eq!(event.paths.len(), 1);
+
+                                let path = &event.paths[0];
+                                let virtual_path = VirtualPath::within_root(path, &this.project_directory).unwrap();
+                                let id = FileId::new(None, virtual_path);
+
+                                this.handle_remove(id);
+                            },
+                        }
+                    }
                 } else {
                     break
                 },
-                _ = self.cancel.cancelled() => {
-                    self.receiver.close();
+                _ = this.cancel.cancelled() => {
+                    println!("Build server actor cancelled");
+                    this.receiver.close();
 
                     break
                 }
             }
         }
+    }
+
+    fn handle_create(&mut self, i: FileId) -> Result<(), ()> {
+        let Warned {
+            output: (_html, _document, dependencies),
+            warnings: _warnings,
+        } = compile(
+            self.resources.clone(),
+            self.package_storage.clone(),
+            self.slots.clone(),
+            i,
+        )
+        .unwrap();
+
+        // TODO: Call extract and passes over fragments, save them
+
+        self.graph.add_node(i);
+        for j in dependencies {
+            if j.package().is_none() {
+                self.graph.add_edge(j, i, ());
+            }
+        }
+
+        self.is_source.insert(i);
+
+        Ok(())
+    }
+
+    fn handle_modify(&mut self, i: FileId) -> Result<(), ()> {
+        println!("{:?}", i);
+        let mut bfs = Bfs::new(&self.graph, i);
+        let mut dependents = Vec::new();
+        let mut slots = self.slots.lock();
+
+        // Note: BFS starts by traversing i, so we don't need to do that manually
+        while let Some(j) = bfs.next(&self.graph) {
+            dependents.push(j);
+            slots.get_mut(&j).unwrap().reset();
+        }
+
+        drop(slots);
+
+        for j in dependents {
+            if self.is_source.contains(&j) {
+                let Warned {
+                    output: (_html, _document, dependencies),
+                    warnings: _warnings,
+                } = compile(
+                    self.resources.clone(),
+                    self.package_storage.clone(),
+                    self.slots.clone(),
+                    i,
+                ).unwrap();
+
+                let ks: Vec<_> = self.graph.edges_directed(j, Direction::Incoming).map(|(k, _, _)| k).collect();
+                for k in ks  {
+                    self.graph.remove_edge(k, j);
+                }
+
+                for k in dependencies {
+                    if k.package().is_none() {
+                        self.graph.add_edge(k, j, ());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_remove(&mut self, id: FileId) {
+        self.graph.remove_node(id);
+        self.is_source.remove(&id);
     }
 }
 
@@ -141,9 +285,8 @@ fn compile<S>(
     resources: Arc<Resources>,
     package_storage: PackageStorage<S>,
     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
-    path: &Path,
-    project_directory: &Path,
-) -> Result<Warned<(Html, HtmlDocument)>, EcoVec<SourceDiagnostic>>
+    main_id: FileId, // project_directory: &Path,
+) -> Result<Warned<(Html, HtmlDocument, HashSet<FileId>)>, EcoVec<SourceDiagnostic>>
 where
     S: Send + Sync,
     S: PackageService,
@@ -151,8 +294,6 @@ where
     PackageError: From<S::GetPackageServiceError>,
     S::GetPackageBuffer: Buf,
 {
-    let virtual_path = VirtualPath::within_root(path, project_directory).unwrap();
-    let main_id = FileId::new(None, virtual_path);
     let world = SystemWorld::new(resources, package_storage, slots, main_id);
 
     let Warned {
@@ -164,10 +305,8 @@ where
     let output = typst_html::html(&document)?;
     let html = Html::parse_document(&output);
 
-    println!("{:?}", document);
-
     Ok(Warned {
-        output: (html, document),
+        output: (html, document, world.into_dependencies()),
         warnings,
     })
 }
@@ -194,79 +333,165 @@ impl FromStr for NoteUuid {
 }
 
 // Very bad ugly bad bad code
-fn extract_note_fragments(html: Html, document: &HtmlDocument) -> Vec<(Uuid, Html)> {
-    let selector = typst::foundations::Selector::Elem(Element::of::<HeadingElem>(), None);
-    let matches = document
+fn extract_note_fragments(html: Html, document: &HtmlDocument) -> HashMap<Uuid, Html> {
+    // let selector = typst::foundations::Selector::Elem(Element::of::<HeadingElem>(), None);
+    // let matches = document
+    //     .introspector()
+    //     .query(&selector)
+    //     .into_iter()
+    //     .filter_map(|c| {
+    //         println!("{:?}", c);
+    //         let uuid: NoteUuid = c.label().and_then(|l| {
+    //             let foo = l.resolve();
+    //             println!("{:?}", foo.as_str());
+
+    //             foo.as_str().parse().ok()
+    //         })?;
+
+    //         Some((c.plain_text(), uuid.0))
+    //     })
+    //     .collect::<Vec<_>>();
+    // let matches_length = matches.len();
+
+    // let header_selector = Selector::parse("body > h2").unwrap();
+    // let headers = html.select(&header_selector);
+
+    // let fragments: Vec<_> = headers
+    //     .map(|h| {
+    //         let mut fragment = Html::new_fragment();
+    //         // TODO:
+    //         let text = h.text().next().unwrap();
+
+    //         fragment.tree.root_mut().append(Node::Element(h.value().clone()));
+
+    //         let siblings = h
+    //             .next_siblings()
+    //             .take_while(|&s| ElementRef::wrap(s).is_none_or(|e| e.value().name() != "h2"));
+
+    //         for sibling in siblings {
+    //             fragment.tree.root_mut().append(sibling.value().clone());
+    //         }
+
+    //         (text, fragment)
+    //     })
+    //     .collect();
+
+    // assert_eq!(matches_length, fragments.len());
+    // for (m, f) in matches.iter().zip(fragments.iter()) {
+    //     assert_eq!(m.0, f.0);
+    // }
+
+    // matches.into_iter().zip(fragments).map(|((_, u), (_, f))| (u, f)).collect()
+
+    let selector =
+        typst::foundations::Selector::Elem(typst::foundations::Element::of::<HeadingElem>(), None);
+    let matches: HashMap<Uuid, String> = document
         .introspector()
         .query(&selector)
         .into_iter()
         .filter_map(|c| {
-            println!("{:?}", c);
-            let uuid: NoteUuid = c.label().and_then(|l| {
-                let foo = l.resolve();
-                println!("{:?}", foo.as_str());
+            let NoteUuid(uuid) = c.label().and_then(|l| {
+                let t = l.resolve();
 
-                foo.as_str().parse().ok()
+                t.as_str().parse().ok()
             })?;
+            let text = c.plain_text();
+            let stripped = text.strip_prefix("Section").unwrap_or(&text);
 
-            Some((c.plain_text(), uuid.0))
+            Some((uuid, stripped.into()))
         })
-        .collect::<Vec<_>>();
-    let matches_length = matches.len();
+        .collect();
 
     let header_selector = Selector::parse("body > h2").unwrap();
     let headers = html.select(&header_selector);
 
-    let fragments: Vec<_> = headers
+    let mut fragments: HashMap<String, Html> = headers
         .map(|h| {
             let mut fragment = Html::new_fragment();
+            let article_name = QualName::new(None, ns!(html), LocalName::from("article"));
+            let article_element = scraper::node::Element::new(article_name, Vec::new());
+            let mut root = fragment.tree.root_mut();
+            let mut article = root.append(Node::Element(article_element));
             // TODO:
             let text = h.text().next().unwrap();
 
-            fragment.tree.root_mut().append(Node::Element(h.value().clone()));
+            // Deref coercion, ooh fancy
+            article.append_subtree(copy_subtree(*h));
 
             let siblings = h
                 .next_siblings()
                 .take_while(|&s| ElementRef::wrap(s).is_none_or(|e| e.value().name() != "h2"));
 
             for sibling in siblings {
-                fragment.tree.root_mut().append(sibling.value().clone());
+                article.append_subtree(copy_subtree(sibling));
             }
 
-            (text, fragment)
+            (text.into(), fragment)
         })
         .collect();
-    
-    assert_eq!(matches_length, fragments.len());
-    for (m, f) in matches.iter().zip(fragments.iter()) {
-        assert_eq!(m.0, f.0);
-    }
 
-    matches.into_iter().zip(fragments).map(|((_, u), (_, f))| (u, f)).collect()
+    // This check is not sufficient. We should check injectivity of both partial
+    // maps or something, I don't know. Point being, terrible things might
+    // happen but I just don't really care unless this bites me later
+    assert_eq!(matches.len(), fragments.len());
+
+    matches
+        .into_iter()
+        .filter_map(|(uuid, header)| fragments.remove(&header).map(|fragment| (uuid, fragment)))
+        .collect()
 }
 
-fn build<S>(
-    resources: Arc<Resources>,
-    package_storage: PackageStorage<S>,
-    slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
-    path: &Path,
-    project_directory: &Path,
-) where
-    S: Send + Sync,
-    S: PackageService,
-    PackageError: From<S::GetIndexServiceError>,
-    PackageError: From<S::GetPackageServiceError>,
-    S::GetPackageBuffer: Buf,
-{
-    // TODO:
-    let Warned {
-        output: (html, document),
-        warnings: _warnings,
-    } = compile(resources, package_storage, slots, path, project_directory).unwrap();
+// fn build<S>(
+//     resources: Arc<Resources>,
+//     package_storage: PackageStorage<S>,
+//     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
+//     path: &Path,
+//     project_directory: &Path,
+//     build_subdirectory: &Path,
+// ) where
+//     S: Send + Sync,
+//     S: PackageService,
+//     PackageError: From<S::GetIndexServiceError>,
+//     PackageError: From<S::GetPackageServiceError>,
+//     S::GetPackageBuffer: Buf,
+// {
+//     // TODO:
+//     let Warned {
+//         output: (html, document, dependencies),
+//         warnings: _warnings,
+//     } = compile(resources, package_storage, slots, path, project_directory).unwrap();
 
-    let fragments = extract_note_fragments(html, &document);
+//     let fragments = extract_note_fragments(html, &document);
 
-    for (uuid, f) in fragments {
-        println!("{:?} {:?}", uuid, f);
+//     // TODO: Do async
+//     for (uuid, fragment) in fragments {
+//         let content = fragment.html();
+//         let path = build_subdirectory.join(format!("{}.html", uuid));
+
+//         fs::write(path, content).unwrap();
+//     }
+// }
+
+fn copy_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
+    let mut tree = Tree::new(source.value().clone());
+    let mut stack: Vec<(NodeRef<T>, NodeId)> = Vec::new();
+
+    {
+        let root_id = tree.root_mut().id();
+        stack.push((source, root_id));
     }
+
+    while let Some((source_parent, destination_parent_id)) = stack.pop() {
+        let mut destination_parent = tree.get_mut(destination_parent_id).unwrap();
+
+        // Note: rev is efficient because children is a double-ended iterator
+        for source_child in source_parent.children().rev() {
+            let destination_child = destination_parent.append(source_child.value().clone());
+            let destination_child_id = destination_child.id();
+
+            stack.push((source_child, destination_child_id));
+        }
+    }
+
+    tree
 }
