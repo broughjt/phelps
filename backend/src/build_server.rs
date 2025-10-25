@@ -207,19 +207,13 @@ impl BuildServer {
         }
     }
 
-    fn handle_create(&mut self, i: FileId) -> Result<(), ()> {
-        let Warned {
-            output: (_html, _document, dependencies),
-            warnings: _warnings,
-        } = compile(
+    fn handle_create(&mut self, i: FileId) -> Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>> {
+        let (Warned { output: outputs, warnings }, dependencies) = build(
             self.resources.clone(),
             self.package_storage.clone(),
             self.slots.clone(),
             i,
-        )
-        .unwrap();
-
-        // TODO: Call extract and passes over fragments, save them
+        )?;
 
         self.graph.add_node(i);
         for j in dependencies {
@@ -230,49 +224,58 @@ impl BuildServer {
 
         self.is_source.insert(i);
 
-        Ok(())
+        Ok(Warned { output: outputs, warnings })
     }
 
-    fn handle_modify(&mut self, i: FileId) -> Result<(), ()> {
-        println!("{:?}", i);
+    fn handle_modify(&mut self, i: FileId) -> Vec<(FileId, Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>>)> {
         let mut bfs = Bfs::new(&self.graph, i);
         let mut dependents = Vec::new();
-        let mut slots = self.slots.lock();
 
-        // Note: BFS starts by traversing i, so we don't need to do that manually
-        while let Some(j) = bfs.next(&self.graph) {
-            dependents.push(j);
-            slots.get_mut(&j).unwrap().reset();
-        }
-
-        drop(slots);
-
-        for j in dependents {
-            if self.is_source.contains(&j) {
-                let Warned {
-                    output: (_html, _document, dependencies),
-                    warnings: _warnings,
-                } = compile(
-                    self.resources.clone(),
-                    self.package_storage.clone(),
-                    self.slots.clone(),
-                    i,
-                ).unwrap();
-
-                let ks: Vec<_> = self.graph.edges_directed(j, Direction::Incoming).map(|(k, _, _)| k).collect();
-                for k in ks  {
-                    self.graph.remove_edge(k, j);
+        {
+            let mut slots = self.slots.lock();
+            
+            // Note: BFS starts by traversing i, so we don't need to do that manually
+            while let Some(j) = bfs.next(&self.graph) {
+                if self.is_source.contains(&j) {
+                    dependents.push(j);
                 }
-
-                for k in dependencies {
-                    if k.package().is_none() {
-                        self.graph.add_edge(k, j, ());
-                    }
-                }
+                slots.get_mut(&j).unwrap().reset();
             }
         }
 
-        Ok(())
+        // TODO: Wrong type, decide what it should be
+        dependents
+            .iter()
+            .map(|&j| {
+                let result = build(
+                    self.resources.clone(),
+                    self.package_storage.clone(),
+                    self.slots.clone(),
+                    j
+                )
+                    .map(|(warned, dependencies)| {
+                        let ks: Vec<FileId> = self
+                            .graph
+                            .edges_directed(j, Direction::Incoming)
+                            .map(|(k, _, _)| k)
+                            .collect();
+                        
+                        for k in ks {
+                            self.graph.remove_edge(k, j);
+                        }
+                        
+                        for k in dependencies {
+                            if k.package().is_none() {
+                                self.graph.add_edge(k, j, ());
+                            }
+                        }
+
+                        warned
+                    });
+
+                (j, result)
+            })
+            .collect()
     }
 
     fn handle_remove(&mut self, id: FileId) {
@@ -281,12 +284,17 @@ impl BuildServer {
     }
 }
 
+type CompilationOutput = (Html, HtmlDocument, HashSet<FileId>);
+
 fn compile<S>(
     resources: Arc<Resources>,
     package_storage: PackageStorage<S>,
     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
-    main_id: FileId, // project_directory: &Path,
-) -> Result<Warned<(Html, HtmlDocument, HashSet<FileId>)>, EcoVec<SourceDiagnostic>>
+    main_id: FileId,
+) -> Result<
+        Warned<CompilationOutput>,
+        EcoVec<SourceDiagnostic>
+     >
 where
     S: Send + Sync,
     S: PackageService,
@@ -332,57 +340,7 @@ impl FromStr for NoteUuid {
     }
 }
 
-// Very bad ugly bad bad code
-fn extract_note_fragments(html: Html, document: &HtmlDocument) -> HashMap<Uuid, Html> {
-    // let selector = typst::foundations::Selector::Elem(Element::of::<HeadingElem>(), None);
-    // let matches = document
-    //     .introspector()
-    //     .query(&selector)
-    //     .into_iter()
-    //     .filter_map(|c| {
-    //         println!("{:?}", c);
-    //         let uuid: NoteUuid = c.label().and_then(|l| {
-    //             let foo = l.resolve();
-    //             println!("{:?}", foo.as_str());
-
-    //             foo.as_str().parse().ok()
-    //         })?;
-
-    //         Some((c.plain_text(), uuid.0))
-    //     })
-    //     .collect::<Vec<_>>();
-    // let matches_length = matches.len();
-
-    // let header_selector = Selector::parse("body > h2").unwrap();
-    // let headers = html.select(&header_selector);
-
-    // let fragments: Vec<_> = headers
-    //     .map(|h| {
-    //         let mut fragment = Html::new_fragment();
-    //         // TODO:
-    //         let text = h.text().next().unwrap();
-
-    //         fragment.tree.root_mut().append(Node::Element(h.value().clone()));
-
-    //         let siblings = h
-    //             .next_siblings()
-    //             .take_while(|&s| ElementRef::wrap(s).is_none_or(|e| e.value().name() != "h2"));
-
-    //         for sibling in siblings {
-    //             fragment.tree.root_mut().append(sibling.value().clone());
-    //         }
-
-    //         (text, fragment)
-    //     })
-    //     .collect();
-
-    // assert_eq!(matches_length, fragments.len());
-    // for (m, f) in matches.iter().zip(fragments.iter()) {
-    //     assert_eq!(m.0, f.0);
-    // }
-
-    // matches.into_iter().zip(fragments).map(|((_, u), (_, f))| (u, f)).collect()
-
+fn extract_note_fragments(html: &Html, document: &HtmlDocument) -> Vec<(String, Uuid, Html)> {
     let selector =
         typst::foundations::Selector::Elem(typst::foundations::Element::of::<HeadingElem>(), None);
     let matches: HashMap<Uuid, String> = document
@@ -412,11 +370,7 @@ fn extract_note_fragments(html: Html, document: &HtmlDocument) -> HashMap<Uuid, 
             let article_element = scraper::node::Element::new(article_name, Vec::new());
             let mut root = fragment.tree.root_mut();
             let mut article = root.append(Node::Element(article_element));
-            // TODO:
-            let text = h.text().next().unwrap();
-
-            // Deref coercion, ooh fancy
-            article.append_subtree(copy_subtree(*h));
+            let text = h.text().next().unwrap_or_default();
 
             let siblings = h
                 .next_siblings()
@@ -430,47 +384,16 @@ fn extract_note_fragments(html: Html, document: &HtmlDocument) -> HashMap<Uuid, 
         })
         .collect();
 
-    // This check is not sufficient. We should check injectivity of both partial
-    // maps or something, I don't know. Point being, terrible things might
-    // happen but I just don't really care unless this bites me later
+    // Note: This check is not sufficient. We should check injectivity of both
+    // partial maps or something, I don't know. Point being, terrible things
+    // might happen but I just don't really care unless this bites me later
     assert_eq!(matches.len(), fragments.len());
 
     matches
         .into_iter()
-        .filter_map(|(uuid, header)| fragments.remove(&header).map(|fragment| (uuid, fragment)))
+        .filter_map(|(uuid, title)| fragments.remove(&title).map(|fragment| (title, uuid, fragment)))
         .collect()
 }
-
-// fn build<S>(
-//     resources: Arc<Resources>,
-//     package_storage: PackageStorage<S>,
-//     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
-//     path: &Path,
-//     project_directory: &Path,
-//     build_subdirectory: &Path,
-// ) where
-//     S: Send + Sync,
-//     S: PackageService,
-//     PackageError: From<S::GetIndexServiceError>,
-//     PackageError: From<S::GetPackageServiceError>,
-//     S::GetPackageBuffer: Buf,
-// {
-//     // TODO:
-//     let Warned {
-//         output: (html, document, dependencies),
-//         warnings: _warnings,
-//     } = compile(resources, package_storage, slots, path, project_directory).unwrap();
-
-//     let fragments = extract_note_fragments(html, &document);
-
-//     // TODO: Do async
-//     for (uuid, fragment) in fragments {
-//         let content = fragment.html();
-//         let path = build_subdirectory.join(format!("{}.html", uuid));
-
-//         fs::write(path, content).unwrap();
-//     }
-// }
 
 fn copy_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
     let mut tree = Tree::new(source.value().clone());
@@ -495,3 +418,55 @@ fn copy_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
 
     tree
 }
+
+// fn find_links(html: &Html, document: &HtmlDocument)
+
+pub struct BuildOutput {
+    pub title: String,
+    pub id: Uuid,
+    pub fragment: String,
+    pub links: Vec<Uuid>
+}
+
+type BuildOutputs = (Warned<Vec<BuildOutput>>, HashSet<FileId>);
+
+fn build<S>(
+    resources: Arc<Resources>,
+    package_storage: PackageStorage<S>,
+    slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
+    main_id: FileId
+) -> Result<
+        BuildOutputs,
+        EcoVec<SourceDiagnostic>
+     >
+where
+    S: Send + Sync,
+    S: PackageService,
+    PackageError: From<S::GetIndexServiceError>,
+    PackageError: From<S::GetPackageServiceError>,
+    S::GetPackageBuffer: Buf,
+{
+    // TODO:
+    let Warned {
+        output: (html, document, dependencies),
+        warnings,
+    } = compile(resources, package_storage, slots, main_id).unwrap();
+
+    let fragments = extract_note_fragments(&html, &document);
+    let output = fragments
+        .into_iter()
+        .map(|(title, id, fragment)| {
+             let links = Vec::new();
+
+             BuildOutput {
+                 title,
+                 id,
+                 fragment: fragment.html(),
+                 links
+             }
+        })
+        .collect();
+
+    Ok((Warned { output, warnings }, dependencies))
+}
+
