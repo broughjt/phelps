@@ -3,7 +3,7 @@ use std::{
 };
 
 use bytes::Buf;
-use ego_tree::{NodeId, NodeRef, Tree};
+use ego_tree::{NodeRef, Tree};
 use http_body_util::Empty;
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
@@ -488,7 +488,20 @@ fn extract_note_fragments(html: &Html, document: &HtmlDocument) -> Vec<(String, 
 }
 
 fn copy_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
-    todo!()
+    let mut tree = Tree::new(source.value().clone());
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((source, tree.root().id()));
+
+    while let Some((source_node, destination_id)) = queue.pop_front() {
+        let mut destination_node = tree.get_mut(destination_id).unwrap();
+
+        for source_child in source_node.children() {
+            let destination_child_id = destination_node.append(source_child.value().clone()).id();
+            queue.push_back((source_child, destination_child_id));
+        }
+    }
+
+    tree
 }
 
 fn find_links(html: &Html) -> Vec<Uuid> {
