@@ -1,26 +1,13 @@
-// use std::collections::HashMap;
 use std::error::Error;
-// use std::path::PathBuf;
-// use std::sync::Arc;
 
 use clap::Parser;
-use phelps::build_server::BuildServer;
-// use http_body_util::Empty;
-// use hyper_rustls::HttpsConnectorBuilder;
-// use hyper_util::client::legacy::Client;
-// use hyper_util::rt::TokioExecutor;
-// use parking_lot::Mutex;
-use phelps::{router::router, service::NotesActorHandle};
+use phelps::build_service::BuildService;
+use phelps::{router::router, notes_service::NotesServiceHandle};
 use tokio::runtime::Runtime;
 use tokio::{net::TcpListener, signal};
-// use typst::syntax::FileId;
-// use walkdir::{DirEntry, WalkDir};
 
-// use phelps::build::{build, watch};
 use phelps::config::{Arguments, Commands, Config};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-// use phelps::package::{ClientWrapper, HttpWrapper, PackageStorage};
-// use phelps::system_world::{FileSlot, Resources};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::try_parse()?;
@@ -28,7 +15,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match arguments.command {
         Commands::Watch => watch(config),
-        Commands::Compile => compile(config),
     }
 }
 
@@ -50,27 +36,28 @@ fn watch(config: Config) -> Result<(), Box<dyn Error>> {
             });
         }
 
-        let build_server = BuildServer::try_build(
+        let (notes_service_handle, notes_service) = NotesServiceHandle::build(
+            cancel.clone(),
+            config.build_subdirectory.clone()
+        );
+        let build_server = BuildService::try_build(
             config.project_directory,
             config.notes_subdirectory,
             config.build_subdirectory,
             config.cache_directory,
             config.data_directory,
             runtime.handle().clone(),
+            notes_service_handle.clone(),
             cancel.clone(),
         )?;
+        
         tracker.spawn(build_server.run());
+        tracker.spawn(notes_service.run());
 
-        let (actor_handle, actor) = NotesActorHandle::build(cancel);
-        tracker.spawn(actor.run());
-
-        // TODO: Spawn a task for http server
-
-        let router = router(actor_handle);
+        let router = router(notes_service_handle);
         let listener = TcpListener::bind("127.0.0.1:3000").await?;
-
         let http = axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown())
+            .with_graceful_shutdown(cancel.cancelled_owned())
             .into_future();
 
         tracker.spawn(http);
@@ -80,12 +67,4 @@ fn watch(config: Config) -> Result<(), Box<dyn Error>> {
 
         Ok(())
     })
-}
-
-fn compile(_config: Config) -> Result<(), Box<dyn Error>> {
-    todo!()
-}
-
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
 }

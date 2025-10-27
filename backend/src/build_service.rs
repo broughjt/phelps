@@ -1,9 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
+    collections::{HashMap, HashSet}, error::Error, path::PathBuf, str::FromStr, sync::Arc
 };
 
 use bytes::Buf;
@@ -15,11 +11,11 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use markup5ever::{LocalName, QualName, ns};
-use notify::{Error, Event, EventHandler, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventHandler, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use petgraph::{prelude::DiGraphMap, visit::Bfs, Direction};
 use scraper::{ElementRef, Html, Node, Selector};
-use tokio::{runtime::Handle, sync::mpsc};
+use tokio::{fs::{self, File}, runtime::Handle, sync::mpsc, io::AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use typst::{
     Document,
@@ -33,19 +29,18 @@ use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::{
-    package::{ClientWrapper, HttpWrapper, PackageService, PackageStorage},
-    system_world::{FileSlot, Resources, SystemWorld},
+    notes_service::{CreateNoteMetadata, NotesServiceHandle}, package::{ClientWrapper, HttpWrapper, PackageService, PackageStorage}, system_world::{FileSlot, Resources, SystemWorld}
 };
 
-pub struct MpscWrapper(pub mpsc::Sender<Result<Event, Error>>);
+pub struct MpscWrapper(pub mpsc::Sender<Result<Event, notify::Error>>);
 
 impl EventHandler for MpscWrapper {
-    fn handle_event(&mut self, result: Result<Event, Error>) {
+    fn handle_event(&mut self, result: Result<Event, notify::Error>) {
         let _ = self.0.blocking_send(result);
     }
 }
 
-pub struct BuildServer {
+pub struct BuildService {
     project_directory: PathBuf,
     notes_subdirectory: PathBuf,
     build_subdirectory: PathBuf,
@@ -55,13 +50,16 @@ pub struct BuildServer {
     resources: Arc<Resources>,
     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
     is_source: HashSet<FileId>,
-    receiver: mpsc::Receiver<Result<Event, Error>>,
+    notes_service: NotesServiceHandle,
+    receiver: mpsc::Receiver<Result<Event, notify::Error>>,
     watcher: RecommendedWatcher,
     cancel: CancellationToken,
     graph: DiGraphMap<FileId, ()>,
 }
 
-impl BuildServer {
+impl BuildService {
+    // No it doesn't
+    #[allow(clippy::too_many_arguments)]
     pub fn try_build(
         project_directory: PathBuf,
         notes_subdirectory: PathBuf,
@@ -69,8 +67,9 @@ impl BuildServer {
         cache_directory: PathBuf,
         data_directory: PathBuf,
         handle: Handle,
+        notes_service: NotesServiceHandle,
         cancel: CancellationToken,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, notify::Error> {
         const BUFFER_SIZE: usize = 128;
         let (sender, receiver) = mpsc::channel(BUFFER_SIZE);
 
@@ -105,21 +104,20 @@ impl BuildServer {
             resources,
             slots,
             is_source,
+            notes_service,
             watcher,
             cancel,
             graph,
         })
     }
 
-    pub fn startup(&mut self) {
-        // TODO: Do async
+    pub async fn start(&mut self) -> Result<(), Box<dyn Error>> {
         if self.build_subdirectory.exists() {
-            // TODO:
-            fs::remove_dir_all(&self.build_subdirectory).unwrap();
-            // TODO:
-            fs::create_dir(&self.build_subdirectory).unwrap();
+            fs::remove_dir_all(&self.build_subdirectory).await?;
+            fs::create_dir(&self.build_subdirectory).await?;
         }
-
+            
+        // TODO: This probably does lots of blocking operations
         let paths = WalkDir::new(&self.notes_subdirectory)
             .into_iter()
             .filter_map(|result| {
@@ -128,36 +126,36 @@ impl BuildServer {
                     .ok()
                     .filter(|path| path.extension().is_some_and(|s| s == "typ"))
             });
-
+        
         for path in paths {
             let virtual_path = VirtualPath::within_root(&path, &self.project_directory).unwrap();
             let id = FileId::new(None, virtual_path);
-
-            self.handle_create(id).unwrap(); // TODO
+            
+            let _ = self.handle_create(id).await;
         }
+            
+        self.watcher.watch(&self.project_directory, RecursiveMode::Recursive)?;
 
-        self.watcher
-            .watch(&self.project_directory, RecursiveMode::Recursive)
-            .unwrap(); // TODO
+        Ok(())
     }
 
-    pub async fn run(self) {
-        // TODO: During this time, we are not listening for a cancel
-        // signal. Maybe it takes a long time and then we ignore the user's
-        // desire to end the program for a long time. That would suck. We should
-        // fix that, probably by selecting against the cancel signal here too.
-        let mut this = self;
-        let mut this = tokio::task::spawn_blocking(move || {
-            this.startup();
+    pub async fn run(mut self) {
+        // I just don't care
+        let cancel = self.cancel.clone();
 
-            this
-        })
-            .await
-            .unwrap();
+        tokio::select! {
+            _ = self.start() => (),
+            _ = cancel.cancelled() => {
+                println!("Build server actor cancelled");
+                self.receiver.close();
+
+                return
+            }
+        };
 
         loop {
             tokio::select! {
-                option = this.receiver.recv() => if let Some(result) = option {
+                option = self.receiver.recv() => if let Some(result) = option {
                     if let Ok(event) = result {
                         match event.kind {
                             EventKind::Access(_) | EventKind::Any | EventKind::Other => (),
@@ -165,41 +163,41 @@ impl BuildServer {
                                 assert_eq!(event.paths.len(), 1);
 
                                 let path = &event.paths[0];
-                                let virtual_path = VirtualPath::within_root(path, &this.project_directory).unwrap();
+                                let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
                                 let id = FileId::new(None, virtual_path);
 
                                 if id.package().is_none()
                                     && path.extension().is_some_and(|e| e == "typ")
-                                    && path.strip_prefix(&this.notes_subdirectory).is_ok() {
-                                    this.handle_create(id).unwrap(); // TODO
+                                    && path.strip_prefix(&self.notes_subdirectory).is_ok() {
+                                    self.handle_create(id).await;
                                 }
                             },
                             EventKind::Modify(_) => {
                                 assert_eq!(event.paths.len(), 1); // TODO
 
                                 let path = &event.paths[0];
-                                let virtual_path = VirtualPath::within_root(path, &this.project_directory).unwrap();
+                                let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
                                 let id = FileId::new(None, virtual_path);
 
-                                this.handle_modify(id).unwrap(); // TODO
+                                self.handle_modify(id).await;
                             },
                             EventKind::Remove(_) => {
                                 assert_eq!(event.paths.len(), 1);
 
                                 let path = &event.paths[0];
-                                let virtual_path = VirtualPath::within_root(path, &this.project_directory).unwrap();
+                                let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
                                 let id = FileId::new(None, virtual_path);
 
-                                this.handle_remove(id);
+                                self.handle_remove(id).await;
                             },
                         }
                     }
                 } else {
                     break
                 },
-                _ = this.cancel.cancelled() => {
+                _ = cancel.cancelled() => {
                     println!("Build server actor cancelled");
-                    this.receiver.close();
+                    self.receiver.close();
 
                     break
                 }
@@ -207,7 +205,7 @@ impl BuildServer {
         }
     }
 
-    fn handle_create(&mut self, i: FileId) -> Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>> {
+    fn create(&mut self, i: FileId) -> Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>> {
         let (Warned { output: outputs, warnings }, dependencies) = build(
             self.resources.clone(),
             self.package_storage.clone(),
@@ -227,7 +225,33 @@ impl BuildServer {
         Ok(Warned { output: outputs, warnings })
     }
 
-    fn handle_modify(&mut self, i: FileId) -> Vec<(FileId, Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>>)> {
+    async fn handle_create(&mut self, i: FileId) {
+        match self.create(i) {
+            Ok(Warned { output: outputs, warnings }) => {
+                for output in &outputs {
+                    let path = self.build_subdirectory.join(format!("{}.html", output.id));
+                    if let Ok(mut file) = File::create(path).await {
+                        let _ = file.write_all(output.fragment.as_bytes()).await;
+                    }
+                }
+
+                let outputs = outputs
+                    .into_iter()
+                    .map(|BuildOutput { title, id, links, .. }| {
+                        CreateNoteMetadata { title, id, links }
+                    })
+                    .collect();
+
+                let _ = self.notes_service.create_notes(i, Ok(Warned { output: outputs, warnings })).await;
+            }
+            Err(error) => {
+                let _ = self.notes_service.create_notes(i, Err(error)).await;
+            }
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn modify(&mut self, i: FileId) -> Vec<(FileId, Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>>)> {
         let mut bfs = Bfs::new(&self.graph, i);
         let mut dependents = Vec::new();
 
@@ -243,7 +267,6 @@ impl BuildServer {
             }
         }
 
-        // TODO: Wrong type, decide what it should be
         dependents
             .iter()
             .map(|&j| {
@@ -256,8 +279,7 @@ impl BuildServer {
                     .map(|(warned, dependencies)| {
                         let ks: Vec<FileId> = self
                             .graph
-                            .edges_directed(j, Direction::Incoming)
-                            .map(|(k, _, _)| k)
+                            .neighbors_directed(j, Direction::Incoming)
                             .collect();
                         
                         for k in ks {
@@ -278,9 +300,50 @@ impl BuildServer {
             .collect()
     }
 
-    fn handle_remove(&mut self, id: FileId) {
-        self.graph.remove_node(id);
-        self.is_source.remove(&id);
+    async fn handle_modify(&mut self, id: FileId) {
+        // I am pretty ashamed of this code. Honestly I'm ashamed of all the
+        // code in the entire project but having to write this handler brought
+        // that shame to a point. @Conman: "It works"
+
+        let results = self.modify(id);
+        let mut results_new = Vec::with_capacity(results.len());
+
+        for (file_id, result) in results {
+            match result {
+                Ok(Warned { output: outputs, warnings }) => {
+                    for output in &outputs {
+                        let path = self.build_subdirectory.join(format!("{}.html", output.id));
+                        if let Ok(mut file) = File::create(path).await {
+                            let _ = file.write_all(output.fragment.as_bytes()).await;
+                        }
+                    }
+
+                    let outputs = outputs
+                        .into_iter()
+                        .map(|BuildOutput { title, id, links, .. }| {
+                            CreateNoteMetadata { title, id, links }
+                        })
+                        .collect();
+
+                    results_new.push((file_id, Ok(Warned { output: outputs, warnings })));
+                }
+                Err(error) => {
+                    results_new.push((file_id, Err(error)));
+                }
+            }
+        }
+
+        let _ = self.notes_service.update_notes(results_new).await;
+    }
+
+    fn remove(&mut self, file_id: FileId) {
+        self.graph.remove_node(file_id);
+        self.is_source.remove(&file_id);
+    }
+
+    async fn handle_remove(&mut self, file_id: FileId) {
+        self.remove(file_id);
+        let _ = self.notes_service.remove_notes(file_id).await;
     }
 }
 
@@ -446,11 +509,10 @@ where
     PackageError: From<S::GetPackageServiceError>,
     S::GetPackageBuffer: Buf,
 {
-    // TODO:
     let Warned {
         output: (html, document, dependencies),
         warnings,
-    } = compile(resources, package_storage, slots, main_id).unwrap();
+    } = compile(resources, package_storage, slots, main_id)?;
 
     let fragments = extract_note_fragments(&html, &document);
     let output = fragments

@@ -1,3 +1,5 @@
+use std::io;
+
 use axum::{
     Json, Router,
     body::Body,
@@ -9,10 +11,10 @@ use http::{Response, StatusCode};
 use tower_http::cors;
 use uuid::Uuid;
 
-use crate::service::{NoteMetadata, NotesActorHandle, NotesActorHandleError};
+use crate::notes_service::{GetNoteMetadata, NotesServiceHandle, NotesServiceHandleError};
 
 struct GetNoteContentResponse {
-    result: Result<Result<Option<String>, ()>, NotesActorHandleError>,
+    result: Result<Result<Option<String>, io::Error>, NotesServiceHandleError>,
 }
 
 impl IntoResponse for GetNoteContentResponse {
@@ -26,16 +28,16 @@ impl IntoResponse for GetNoteContentResponse {
 }
 
 async fn get_note_content(
-    State(actor): State<NotesActorHandle>,
+    State(notes_service): State<NotesServiceHandle>,
     Path(id): Path<Uuid>,
 ) -> GetNoteContentResponse {
-    let result = actor.get_note_content(id).await;
+    let result = notes_service.get_note_content(id).await;
 
     GetNoteContentResponse { result }
 }
 
 struct GetNoteMetadataResponse {
-    result: Result<Option<NoteMetadata>, NotesActorHandleError>,
+    result: Result<Option<GetNoteMetadata>, NotesServiceHandleError>,
 }
 
 impl IntoResponse for GetNoteMetadataResponse {
@@ -49,15 +51,15 @@ impl IntoResponse for GetNoteMetadataResponse {
 }
 
 async fn get_note_metadata(
-    State(actor): State<NotesActorHandle>,
+    State(notes_service): State<NotesServiceHandle>,
     Path(id): Path<Uuid>,
 ) -> GetNoteMetadataResponse {
-    let result = actor.get_note_metadata(id).await;
+    let result = notes_service.get_note_metadata(id).await;
 
     GetNoteMetadataResponse { result }
 }
 
-pub fn router(actor: NotesActorHandle) -> Router<()> {
+pub fn router(actor: NotesServiceHandle) -> Router<()> {
     let cors = cors::CorsLayer::new()
         .allow_origin(cors::Any)
         .allow_methods([http::Method::GET, http::Method::POST])

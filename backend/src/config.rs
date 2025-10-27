@@ -15,7 +15,6 @@ pub struct Arguments {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     Watch,
-    Compile,
 }
 
 #[derive(Debug, Deserialize)]
