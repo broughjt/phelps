@@ -178,8 +178,13 @@ impl BuildService {
                                 let path = &event.paths[0];
                                 let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
                                 let id = FileId::new(None, virtual_path);
+                                let is_source = id.package().is_none()
+                                    && path.extension().is_some_and(|e| e == "typ")
+                                    && path.strip_prefix(&self.notes_subdirectory).is_ok();
 
-                                self.handle_modify(id).await;
+                                if self.graph.contains_node(id) || is_source {
+                                    self.handle_modify(id).await;
+                                }
                             },
                             EventKind::Remove(_) => {
                                 assert_eq!(event.paths.len(), 1);
@@ -206,6 +211,7 @@ impl BuildService {
     }
 
     fn create(&mut self, i: FileId) -> Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>> {
+        println!("create {:?}", i);
         let (Warned { output: outputs, warnings }, dependencies) = build(
             self.resources.clone(),
             self.package_storage.clone(),
@@ -252,6 +258,7 @@ impl BuildService {
 
     #[allow(clippy::type_complexity)]
     fn modify(&mut self, i: FileId) -> Vec<(FileId, Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>>)> {
+        println!("modify {:?}", i);
         let mut bfs = Bfs::new(&self.graph, i);
         let mut dependents = Vec::new();
 
@@ -374,6 +381,7 @@ where
     let document = result?;
 
     let output = typst_html::html(&document)?;
+    println!("{}", output);
     let html = Html::parse_document(&output);
 
     Ok(Warned {
@@ -399,6 +407,27 @@ impl FromStr for NoteUuid {
                 Uuid::from_str(s)
                     .map(NoteUuid)
                     .map_err(NoteUuidParseError::Uuid)
+            })
+    }
+}
+
+pub struct NoteLink(pub Uuid);
+
+pub enum NoteLinkParseError {
+    MissingPrefix,
+    Uuid(uuid::Error),
+}
+
+impl FromStr for NoteLink {
+    type Err = NoteLinkParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.strip_prefix("note://")
+            .ok_or(NoteLinkParseError::MissingPrefix)
+            .and_then(|s| {
+                Uuid::from_str(s)
+                    .map(NoteLink)
+                    .map_err(NoteLinkParseError::Uuid)
             })
     }
 }
@@ -459,30 +488,25 @@ fn extract_note_fragments(html: &Html, document: &HtmlDocument) -> Vec<(String, 
 }
 
 fn copy_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
-    let mut tree = Tree::new(source.value().clone());
-    let mut stack: Vec<(NodeRef<T>, NodeId)> = Vec::new();
-
-    {
-        let root_id = tree.root_mut().id();
-        stack.push((source, root_id));
-    }
-
-    while let Some((source_parent, destination_parent_id)) = stack.pop() {
-        let mut destination_parent = tree.get_mut(destination_parent_id).unwrap();
-
-        // Note: rev is efficient because children is a double-ended iterator
-        for source_child in source_parent.children().rev() {
-            let destination_child = destination_parent.append(source_child.value().clone());
-            let destination_child_id = destination_child.id();
-
-            stack.push((source_child, destination_child_id));
-        }
-    }
-
-    tree
+    todo!()
 }
 
-// fn find_links(html: &Html, document: &HtmlDocument)
+fn find_links(html: &Html) -> Vec<Uuid> {
+    let selector = Selector::parse("a").unwrap();
+
+    html
+        .select(&selector)
+        .filter_map(|element| {
+            element.attr("href").and_then(|href| {
+                if let Ok(NoteLink(uuid)) = href.parse() {
+                    Some(uuid)
+                } else {
+                    None
+                }
+            })
+        })
+        .collect()
+}
 
 pub struct BuildOutput {
     pub title: String,
@@ -518,7 +542,7 @@ where
     let output = fragments
         .into_iter()
         .map(|(title, id, fragment)| {
-             let links = Vec::new();
+             let links = find_links(&fragment);
 
              BuildOutput {
                  title,
