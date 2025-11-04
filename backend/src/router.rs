@@ -3,9 +3,9 @@ use std::io;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, State},
+    extract::{Path, State, ws},
     response::{Html, IntoResponse},
-    routing::get,
+    routing::{any, get},
 };
 use http::{Response, StatusCode};
 use tower_http::cors;
@@ -59,6 +59,22 @@ async fn get_note_metadata(
     GetNoteMetadataResponse { result }
 }
 
+async fn handle_updates(
+    State(notes_service): State<NotesServiceHandle>,
+    websocket: ws::WebSocketUpgrade,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async |socket| {
+        // let (sender, receiver) = socket.split();
+
+        // TODO: Just have a pure server sent thing that sends everything. The
+        // client connects once at the beginning, gets an initial graph, and
+        // then receives all updates
+
+        // Then the only other method is get content, which gets called when
+        // content gets replaced (client finds out about this through websocket)
+    })
+}
+
 pub fn router(actor: NotesServiceHandle) -> Router<()> {
     let cors = cors::CorsLayer::new()
         .allow_origin(cors::Any)
@@ -68,6 +84,7 @@ pub fn router(actor: NotesServiceHandle) -> Router<()> {
     Router::new()
         .route("/api/notes/{id}/content", get(get_note_content))
         .route("/api/notes/{id}/metadata", get(get_note_metadata))
+        .route("/api/updates", any(handle_updates))
         .with_state(actor)
         .layer(cors)
 }

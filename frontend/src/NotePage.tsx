@@ -1,32 +1,32 @@
-import { useParams } from "wouter";
+import { JSX, memo } from "react";
 import "./NotePage.css";
-import { NotesApi } from "./api";
-import type { NoteMetadata } from "./api";
-import { useEffect, useState } from "react";
 
-const api = new NotesApi("http://localhost:3000");
+type NotePageProps = {
+  id: string;
+  title: string;
+  links: Set<string>;
+  backlinks: Set<string>;
+};
 
-export default function NotePage() {
-  const { id } = useParams();
-  const [content, setContent] = useState<string>("")
-  const [metadata, setMetadata] = useState<NoteMetadata | null>(null)
-
-  useEffect(() => {
-    if (!id) return
-
-    api.getNoteContent(id).then(setContent).catch(console.error)
-    api.getNoteMetadata(id).then(setMetadata).catch(console.error)
-  }, [id])
-
+function NotePage({ title, backlinks }: NotePageProps): JSX.Element {
   return (
     <div className="layout">
-      <article dangerouslySetInnerHTML={{ __html: content }}></article>
+      <article>
+        <h1>{title}</h1>
+      </article>
       <aside>
+        <h2>Backlinks</h2>
         <ul>
-          {metadata && metadata.links.map(l => <li key={l}>{l}</li>)}
+          {Array.from(backlinks).map((backlink) => (
+            <li key={backlink}>
+              <a href={`/note/${backlink}`}>{backlink}</a>
+            </li>
+          ))}
         </ul>
       </aside>
       <div className="right-column"></div>
     </div>
-  )
+  );
 }
+
+export default memo(NotePage);

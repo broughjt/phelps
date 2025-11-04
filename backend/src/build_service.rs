@@ -1,5 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet}, error::Error, path::PathBuf, str::FromStr, sync::Arc
+    collections::{HashMap, HashSet},
+    error::Error,
+    io,
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
 };
 
 use bytes::Buf;
@@ -13,23 +18,25 @@ use hyper_util::{
 use markup5ever::{LocalName, QualName, ns};
 use notify::{Event, EventHandler, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
-use petgraph::{prelude::DiGraphMap, visit::Bfs, Direction};
+use petgraph::{Direction, prelude::DiGraphMap, visit::Bfs};
 use scraper::{ElementRef, Html, Node, Selector};
-use tokio::{fs::{self, File}, runtime::Handle, sync::mpsc, io::AsyncWriteExt};
+use tokio::{fs, runtime::Handle, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 use typst::{
     Document,
     diag::{PackageError, SourceDiagnostic, Warned},
     ecow::EcoVec,
-    html::HtmlDocument,
     model::HeadingElem,
     syntax::{FileId, VirtualPath},
 };
+use typst_html::HtmlDocument;
 use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::{
-    notes_service::{CreateNoteMetadata, NotesServiceHandle}, package::{ClientWrapper, HttpWrapper, PackageService, PackageStorage}, system_world::{FileSlot, Resources, SystemWorld}
+    notes_service::{CreateNoteMetadata, NotesServiceHandle},
+    package::{ClientWrapper, HttpWrapper, PackageService, PackageStorage},
+    system_world::{FileSlot, Resources, SystemWorld},
 };
 
 pub struct MpscWrapper(pub mpsc::Sender<Result<Event, notify::Error>>);
@@ -43,7 +50,7 @@ impl EventHandler for MpscWrapper {
 pub struct BuildService {
     project_directory: PathBuf,
     notes_subdirectory: PathBuf,
-    build_subdirectory: PathBuf,
+    build_subdirectory: Arc<PathBuf>,
     package_storage: PackageStorage<
         HttpWrapper<ClientWrapper<HttpsConnector<HttpConnector>, Empty<hyper::body::Bytes>>>,
     >,
@@ -92,14 +99,13 @@ impl BuildService {
         let graph = DiGraphMap::new();
         let is_source = HashSet::new();
 
-        // TODO:
         let watcher = RecommendedWatcher::new(MpscWrapper(sender), Default::default())?;
 
         Ok(Self {
             receiver,
             project_directory,
             notes_subdirectory,
-            build_subdirectory,
+            build_subdirectory: Arc::new(build_subdirectory),
             package_storage,
             resources,
             slots,
@@ -113,28 +119,31 @@ impl BuildService {
 
     pub async fn start(&mut self) -> Result<(), Box<dyn Error>> {
         if self.build_subdirectory.exists() {
-            fs::remove_dir_all(&self.build_subdirectory).await?;
-            fs::create_dir(&self.build_subdirectory).await?;
+            fs::remove_dir_all(self.build_subdirectory.as_ref()).await?;
+            fs::create_dir(self.build_subdirectory.as_ref()).await?;
         }
-            
-        // TODO: This probably does lots of blocking operations
-        let paths = WalkDir::new(&self.notes_subdirectory)
-            .into_iter()
-            .filter_map(|result| {
+
+        let walker = WalkDir::new(&self.notes_subdirectory);
+        let paths = tokio::task::spawn_blocking(|| {
+            walker.into_iter().filter_map(|result| {
                 result
                     .map(DirEntry::into_path)
                     .ok()
                     .filter(|path| path.extension().is_some_and(|s| s == "typ"))
-            });
-        
+            })
+        })
+        .await
+        .unwrap();
+
         for path in paths {
             let virtual_path = VirtualPath::within_root(&path, &self.project_directory).unwrap();
             let id = FileId::new(None, virtual_path);
-            
+
             let _ = self.handle_create(id).await;
         }
-            
-        self.watcher.watch(&self.project_directory, RecursiveMode::Recursive)?;
+
+        self.watcher
+            .watch(&self.project_directory, RecursiveMode::Recursive)?;
 
         Ok(())
     }
@@ -210,61 +219,45 @@ impl BuildService {
         }
     }
 
-    fn create(&mut self, i: FileId) -> Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>> {
-        println!("create {:?}", i);
-        let (Warned { output: outputs, warnings }, dependencies) = build(
+    async fn handle_create(&mut self, i: FileId) {
+        match build(
             self.resources.clone(),
             self.package_storage.clone(),
             self.slots.clone(),
+            self.build_subdirectory.clone(),
             i,
-        )?;
-
-        self.graph.add_node(i);
-        for j in dependencies {
-            if j.package().is_none() {
-                self.graph.add_edge(j, i, ());
-            }
-        }
-
-        self.is_source.insert(i);
-
-        Ok(Warned { output: outputs, warnings })
-    }
-
-    async fn handle_create(&mut self, i: FileId) {
-        match self.create(i) {
-            Ok(Warned { output: outputs, warnings }) => {
-                for output in &outputs {
-                    let path = self.build_subdirectory.join(format!("{}.html", output.id));
-                    if let Ok(mut file) = File::create(path).await {
-                        let _ = file.write_all(output.fragment.as_bytes()).await;
-                    }
+        )
+        .await
+        {
+            Ok(Ok((warned, dependencies))) => {
+                self.graph.add_node(i);
+                for j in dependencies {
+                    self.graph.add_edge(i, j, ());
                 }
 
-                let outputs = outputs
-                    .into_iter()
-                    .map(|BuildOutput { title, id, links, .. }| {
-                        CreateNoteMetadata { title, id, links }
-                    })
-                    .collect();
-
-                let _ = self.notes_service.create_notes(i, Ok(Warned { output: outputs, warnings })).await;
+                let _ = self.notes_service.create_notes(i, Ok(warned)).await;
+            }
+            Ok(Err(errors)) => {
+                let _ = self.notes_service.create_notes(i, Err(errors)).await;
             }
             Err(error) => {
-                let _ = self.notes_service.create_notes(i, Err(error)).await;
+                // Here we failed to write on of the fragments to the build
+                // directory. This should result in a fatal error, so we need to
+                // tell the rest of the application to shutdown.
+
+                println!("Failed to write fragment to build directory: {}", error);
+                self.cancel.cancel();
             }
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn modify(&mut self, i: FileId) -> Vec<(FileId, Result<Warned<Vec<BuildOutput>>, EcoVec<SourceDiagnostic>>)> {
-        println!("modify {:?}", i);
+    async fn handle_modify(&mut self, i: FileId) {
         let mut bfs = Bfs::new(&self.graph, i);
         let mut dependents = Vec::new();
 
         {
             let mut slots = self.slots.lock();
-            
+
             // Note: BFS starts by traversing i, so we don't need to do that manually
             while let Some(j) = bfs.next(&self.graph) {
                 if self.is_source.contains(&j) {
@@ -274,97 +267,71 @@ impl BuildService {
             }
         }
 
-        dependents
-            .iter()
-            .map(|&j| {
-                let result = build(
-                    self.resources.clone(),
-                    self.package_storage.clone(),
-                    self.slots.clone(),
-                    j
-                )
-                    .map(|(warned, dependencies)| {
-                        let ks: Vec<FileId> = self
-                            .graph
-                            .neighbors_directed(j, Direction::Incoming)
-                            .collect();
-                        
-                        for k in ks {
-                            self.graph.remove_edge(k, j);
-                        }
-                        
-                        for k in dependencies {
-                            if k.package().is_none() {
-                                self.graph.add_edge(k, j, ());
-                            }
-                        }
+        let mut results = Vec::with_capacity(dependents.len());
 
-                        warned
-                    });
+        for j in dependents {
+            let result = build(
+                self.resources.clone(),
+                self.package_storage.clone(),
+                self.slots.clone(),
+                self.build_subdirectory.clone(),
+                j,
+            )
+            .await;
 
-                (j, result)
-            })
-            .collect()
-    }
-
-    async fn handle_modify(&mut self, id: FileId) {
-        // I am pretty ashamed of this code. Honestly I'm ashamed of all the
-        // code in the entire project but having to write this handler brought
-        // that shame to a point. @Conman: "It works"
-
-        let results = self.modify(id);
-        let mut results_new = Vec::with_capacity(results.len());
-
-        for (file_id, result) in results {
             match result {
-                Ok(Warned { output: outputs, warnings }) => {
-                    for output in &outputs {
-                        let path = self.build_subdirectory.join(format!("{}.html", output.id));
-                        if let Ok(mut file) = File::create(path).await {
-                            let _ = file.write_all(output.fragment.as_bytes()).await;
+                Ok(Ok((warned, dependencies))) => {
+                    let ks: Vec<FileId> = self
+                        .graph
+                        .neighbors_directed(j, Direction::Incoming)
+                        .collect();
+
+                    for k in ks {
+                        self.graph.remove_edge(k, j);
+                    }
+                    for k in dependencies {
+                        if k.package().is_none() {
+                            self.graph.add_edge(k, j, ());
                         }
                     }
 
-                    let outputs = outputs
-                        .into_iter()
-                        .map(|BuildOutput { title, id, links, .. }| {
-                            CreateNoteMetadata { title, id, links }
-                        })
-                        .collect();
-
-                    results_new.push((file_id, Ok(Warned { output: outputs, warnings })));
+                    results.push((j, Ok(warned)));
                 }
+                Ok(Err(error)) => results.push((j, Err(error))),
                 Err(error) => {
-                    results_new.push((file_id, Err(error)));
+                    // We failed to save the fragment to the build directory, we
+                    // need to tell the rest of application to shutdown
+
+                    println!("Failed to save fragment to build directory: {}", error);
+                    self.cancel.cancel();
                 }
             }
         }
 
-        let _ = self.notes_service.update_notes(results_new).await;
+        let _ = self.notes_service.update_notes(results).await;
     }
 
-    fn remove(&mut self, file_id: FileId) {
-        self.graph.remove_node(file_id);
-        self.is_source.remove(&file_id);
-    }
+    async fn handle_remove(&mut self, i: FileId) {
+        // TODO: We should remove the associated fragments from the build
+        // directory, but only the notes service knows which uuids correspond to
+        // this source file. We should probably figure out a way to handle this.
+        // For now the build directory has extra crap until it gets cleaned out.
 
-    async fn handle_remove(&mut self, file_id: FileId) {
-        self.remove(file_id);
-        let _ = self.notes_service.remove_notes(file_id).await;
+        self.graph.remove_node(i);
+        self.is_source.remove(&i);
+
+        let _ = self.notes_service.remove_notes(i).await;
     }
 }
 
-type CompilationOutput = (Html, HtmlDocument, HashSet<FileId>);
+type CompileOutput = (Html, HtmlDocument, HashSet<FileId>);
 
 fn compile<S>(
     resources: Arc<Resources>,
     package_storage: PackageStorage<S>,
     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
     main_id: FileId,
-) -> Result<
-        Warned<CompilationOutput>,
-        EcoVec<SourceDiagnostic>
-     >
+) -> Result<Warned<CompileOutput>, EcoVec<SourceDiagnostic>>
 where
     S: Send + Sync,
     S: PackageService,
@@ -381,7 +348,6 @@ where
     let document = result?;
 
     let output = typst_html::html(&document)?;
-    println!("{}", output);
     let html = Html::parse_document(&output);
 
     Ok(Warned {
@@ -469,7 +435,7 @@ fn extract_note_fragments(html: &Html, document: &HtmlDocument) -> Vec<(String, 
                 .take_while(|&s| ElementRef::wrap(s).is_none_or(|e| e.value().name() != "h2"));
 
             for sibling in siblings {
-                article.append_subtree(copy_subtree(sibling));
+                article.append_subtree(clone_subtree(sibling));
             }
 
             (text.into(), fragment)
@@ -483,11 +449,15 @@ fn extract_note_fragments(html: &Html, document: &HtmlDocument) -> Vec<(String, 
 
     matches
         .into_iter()
-        .filter_map(|(uuid, title)| fragments.remove(&title).map(|fragment| (title, uuid, fragment)))
+        .filter_map(|(uuid, title)| {
+            fragments
+                .remove(&title)
+                .map(|fragment| (title, uuid, fragment))
+        })
         .collect()
 }
 
-fn copy_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
+fn clone_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
     let mut tree = Tree::new(source.value().clone());
     let mut queue = std::collections::VecDeque::new();
     queue.push_back((source, tree.root().id()));
@@ -507,8 +477,7 @@ fn copy_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
 fn find_links(html: &Html) -> Vec<Uuid> {
     let selector = Selector::parse("a").unwrap();
 
-    html
-        .select(&selector)
+    html.select(&selector)
         .filter_map(|element| {
             element.attr("href").and_then(|href| {
                 if let Ok(NoteLink(uuid)) = href.parse() {
@@ -521,51 +490,77 @@ fn find_links(html: &Html) -> Vec<Uuid> {
         .collect()
 }
 
-pub struct BuildOutput {
-    pub title: String,
-    pub id: Uuid,
-    pub fragment: String,
-    pub links: Vec<Uuid>
-}
+type BuildOutputs = (Warned<Vec<CreateNoteMetadata>>, HashSet<FileId>);
 
-type BuildOutputs = (Warned<Vec<BuildOutput>>, HashSet<FileId>);
-
-fn build<S>(
+async fn build<S>(
     resources: Arc<Resources>,
     package_storage: PackageStorage<S>,
     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
-    main_id: FileId
-) -> Result<
-        BuildOutputs,
-        EcoVec<SourceDiagnostic>
-     >
+    build_subdirectory: Arc<PathBuf>,
+    main_id: FileId,
+) -> Result<Result<BuildOutputs, EcoVec<SourceDiagnostic>>, io::Error>
 where
-    S: Send + Sync,
+    S: Send + Sync + 'static,
     S: PackageService,
     PackageError: From<S::GetIndexServiceError>,
     PackageError: From<S::GetPackageServiceError>,
     S::GetPackageBuffer: Buf,
 {
-    let Warned {
-        output: (html, document, dependencies),
-        warnings,
-    } = compile(resources, package_storage, slots, main_id)?;
+    let result = tokio::task::spawn_blocking(move || {
+        let Warned {
+            output: (html, document, dependencies),
+            warnings,
+        } = compile(resources, package_storage, slots, main_id)?;
+        let fragments = extract_note_fragments(&html, &document);
+        let (outputs, writes) = fragments
+            .into_iter()
+            .map(|(title, id, fragment)| {
+                let links = find_links(&fragment);
+                let output = CreateNoteMetadata { title, id, links };
 
-    let fragments = extract_note_fragments(&html, &document);
-    let output = fragments
-        .into_iter()
-        .map(|(title, id, fragment)| {
-             let links = find_links(&fragment);
+                let content = fragment.html();
+                let path = build_subdirectory.join(format!("{}.html", id));
+                let write = fs::write(path, content);
 
-             BuildOutput {
-                 title,
-                 id,
-                 fragment: fragment.html(),
-                 links
-             }
-        })
-        .collect();
+                (output, write)
+            })
+            .unzip::<_, _, Vec<_>, Vec<_>>();
 
-    Ok((Warned { output, warnings }, dependencies))
+        Ok((
+            Warned {
+                output: (outputs, writes),
+                warnings,
+            },
+            dependencies,
+        ))
+    })
+    .await
+    // If code in this task panics, we should panic
+    .unwrap();
+
+    match result {
+        Ok((
+            Warned {
+                output: (outputs, writes),
+                warnings,
+            },
+            dependencies,
+        )) => {
+            futures::future::join_all(writes)
+                .await
+                .into_iter()
+                // `try_for_each` assumes you're calling an effect. For us, we
+                // just want to check if all writes succeeded.
+                .try_for_each(|result| result)?;
+
+            Ok(Ok((
+                Warned {
+                    output: outputs,
+                    warnings,
+                },
+                dependencies,
+            )))
+        }
+        Err(errors) => Ok(Err(errors)),
+    }
 }
-

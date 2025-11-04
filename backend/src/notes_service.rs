@@ -1,16 +1,21 @@
 use std::{collections::HashMap, io, path::PathBuf};
 
-use petgraph::{
-    prelude::DiGraphMap, Direction
-};
+use petgraph::{Direction, prelude::DiGraphMap};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::{fs, sync::{mpsc, oneshot}};
+use tokio::{fs, sync::{mpsc, oneshot, broadcast}};
 use tokio_util::sync::CancellationToken;
-use typst::{diag::{SourceDiagnostic, Warned}, ecow::EcoVec, syntax::FileId};
+use typst::{
+    diag::{SourceDiagnostic, Warned},
+    ecow::EcoVec,
+    syntax::FileId,
+};
 use uuid::Uuid;
 
 pub const BUFFER_SIZE: usize = 64;
+
+// - We shouldn't send any websocket updates until the build server has compiled
+//   all the notes initially and we have an entire graph to send
 
 struct NotesServiceState {
     links: DiGraphMap<Uuid, ()>,
@@ -18,6 +23,7 @@ struct NotesServiceState {
     metadata: HashMap<Uuid, (String, FileId)>,
     file_ids: HashMap<FileId, Vec<Uuid>>,
     errors: HashMap<FileId, Result<Warned<()>, EcoVec<SourceDiagnostic>>>,
+    broadcast::Sender<_>
 }
 
 impl NotesServiceState {
@@ -48,7 +54,7 @@ impl NotesServiceState {
             Some(GetNoteMetadata {
                 title: title.clone(),
                 links,
-                backlinks
+                backlinks,
             })
         } else {
             None
@@ -58,7 +64,11 @@ impl NotesServiceState {
     fn create_note(
         &mut self,
         file_id: FileId,
-        CreateNoteMetadata { title, id: i, links }: CreateNoteMetadata
+        CreateNoteMetadata {
+            title,
+            id: i,
+            links,
+        }: CreateNoteMetadata,
     ) {
         self.links.add_node(i);
 
@@ -73,17 +83,24 @@ impl NotesServiceState {
     fn create_notes(
         &mut self,
         file_id: FileId,
-        result: Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>
+        result: Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
     ) {
         match result {
             Ok(Warned { output, warnings }) => {
-                self.errors.insert(file_id, Ok(Warned { output: (), warnings }));
-                self.file_ids.insert(file_id, Vec::with_capacity(output.len()));
+                self.errors.insert(
+                    file_id,
+                    Ok(Warned {
+                        output: (),
+                        warnings,
+                    }),
+                );
+                self.file_ids
+                    .insert(file_id, Vec::with_capacity(output.len()));
 
                 for data in output {
                     self.create_note(file_id, data);
                 }
-            },
+            }
             Err(error) => {
                 self.errors.insert(file_id, Err(error));
             }
@@ -93,7 +110,11 @@ impl NotesServiceState {
     fn update_note(
         &mut self,
         file_id: FileId,
-        CreateNoteMetadata { title, id: i, links }: CreateNoteMetadata
+        CreateNoteMetadata {
+            title,
+            id: i,
+            links,
+        }: CreateNoteMetadata,
     ) {
         let js: Vec<Uuid> = self.links.neighbors(i).collect();
 
@@ -110,18 +131,27 @@ impl NotesServiceState {
 
     fn update_notes(
         &mut self,
-        outputs: Vec<(FileId, Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>)>
+        outputs: Vec<(
+            FileId,
+            Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
+        )>,
     ) {
         for (file_id, result) in outputs {
             match result {
                 Ok(Warned { output, warnings }) => {
-                    self.errors.insert(file_id, Ok(Warned { output: (), warnings }));
+                    self.errors.insert(
+                        file_id,
+                        Ok(Warned {
+                            output: (),
+                            warnings,
+                        }),
+                    );
                     self.file_ids.get_mut(&file_id).unwrap().clear();
-                    
+
                     for data in output {
                         self.update_note(file_id, data);
                     }
-                },
+                }
                 Err(error) => {
                     self.errors.insert(file_id, Err(error));
                 }
@@ -165,31 +195,40 @@ struct GetNoteMetadataResponse {
 pub struct CreateNoteMetadata {
     pub title: String,
     pub id: Uuid,
-    pub links: Vec<Uuid>
+    pub links: Vec<Uuid>,
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct GetNoteMetadata {
     pub title: String,
     pub links: Vec<Uuid>,
-    pub backlinks: Vec<Uuid>
+    pub backlinks: Vec<Uuid>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "t", content = "c")]
+pub enum NoteUpdate {
+    Update
 }
 
 pub struct CreateNotesRequest {
     pub file_id: FileId,
-    pub result: Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>
+    pub result: Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
 }
 
 pub struct CreateNotesResponse {}
 
 pub struct UpdateNotesRequest {
-    pub outputs: Vec<(FileId, Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>)>
+    pub outputs: Vec<(
+        FileId,
+        Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
+    )>,
 }
 
 pub struct UpdateNotesResponse {}
 
 pub struct RemoveNotesRequest {
-    pub file_id: FileId
+    pub file_id: FileId,
 }
 
 pub struct RemoveNotesResponse {}
@@ -225,7 +264,7 @@ impl Message<CreateNotesRequest> for NotesServiceState {
 
     async fn handle(
         &mut self,
-        CreateNotesRequest { file_id, result }: CreateNotesRequest
+        CreateNotesRequest { file_id, result }: CreateNotesRequest,
     ) -> Self::Response {
         self.create_notes(file_id, result);
 
@@ -238,7 +277,7 @@ impl Message<RemoveNotesRequest> for NotesServiceState {
 
     async fn handle(
         &mut self,
-        RemoveNotesRequest { file_id }: RemoveNotesRequest
+        RemoveNotesRequest { file_id }: RemoveNotesRequest,
     ) -> Self::Response {
         self.remove_notes(file_id);
 
@@ -251,7 +290,7 @@ impl Message<UpdateNotesRequest> for NotesServiceState {
 
     async fn handle(
         &mut self,
-        UpdateNotesRequest { outputs }: UpdateNotesRequest
+        UpdateNotesRequest { outputs }: UpdateNotesRequest,
     ) -> Self::Response {
         self.update_notes(outputs);
 
@@ -270,8 +309,7 @@ enum NotesMessage {
     ),
     CreateNotes(CreateNotesRequest),
     UpdateNotes(UpdateNotesRequest),
-    RemoveNotes(RemoveNotesRequest)
-        
+    RemoveNotes(RemoveNotesRequest),
 }
 
 pub struct NotesService {
@@ -356,8 +394,9 @@ impl NotesServiceHandle {
             .send(message)
             .await
             .map_err(|_| NotesServiceHandleError::Send)?;
-        let GetNoteContentResponse { result } =
-            receiver.await.map_err(|_| NotesServiceHandleError::Receive)?;
+        let GetNoteContentResponse { result } = receiver
+            .await
+            .map_err(|_| NotesServiceHandleError::Receive)?;
 
         Ok(result)
     }
@@ -372,8 +411,9 @@ impl NotesServiceHandle {
             .send(message)
             .await
             .map_err(|_| NotesServiceHandleError::Send)?;
-        let GetNoteMetadataResponse { result } =
-            receiver.await.map_err(|_| NotesServiceHandleError::Receive)?;
+        let GetNoteMetadataResponse { result } = receiver
+            .await
+            .map_err(|_| NotesServiceHandleError::Receive)?;
 
         Ok(result)
     }
@@ -381,7 +421,7 @@ impl NotesServiceHandle {
     pub async fn create_notes(
         &self,
         file_id: FileId,
-        result: Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>
+        result: Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
     ) -> Result<(), NotesServiceHandleError> {
         let message = NotesMessage::CreateNotes(CreateNotesRequest { file_id, result });
         self.sender
@@ -396,8 +436,8 @@ impl NotesServiceHandle {
         &self,
         outputs: Vec<(
             FileId,
-            Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>
-        )>
+            Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
+        )>,
     ) -> Result<(), NotesServiceHandleError> {
         let message = NotesMessage::UpdateNotes(UpdateNotesRequest { outputs });
         self.sender
@@ -408,10 +448,7 @@ impl NotesServiceHandle {
         Ok(())
     }
 
-    pub async fn remove_notes(
-        &self,
-        file_id: FileId,
-    ) -> Result<(), NotesServiceHandleError> {
+    pub async fn remove_notes(&self, file_id: FileId) -> Result<(), NotesServiceHandleError> {
         let message = NotesMessage::RemoveNotes(RemoveNotesRequest { file_id });
         self.sender
             .send(message)
@@ -423,7 +460,7 @@ impl NotesServiceHandle {
 
     pub fn build(
         cancel: CancellationToken,
-        build_subdirectory: PathBuf
+        build_subdirectory: PathBuf,
     ) -> (NotesServiceHandle, NotesService) {
         let (sender, receiver) = mpsc::channel(BUFFER_SIZE);
         let state = NotesServiceState {
@@ -431,9 +468,13 @@ impl NotesServiceHandle {
             links: DiGraphMap::default(),
             metadata: HashMap::default(),
             file_ids: HashMap::default(),
-            errors: HashMap::default()
+            errors: HashMap::default(),
         };
-        let service = NotesService { state, receiver, cancel };
+        let service = NotesService {
+            state,
+            receiver,
+            cancel,
+        };
         let handle = NotesServiceHandle { sender };
 
         (handle, service)
