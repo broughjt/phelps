@@ -26,7 +26,7 @@ struct NotesServiceState {
     ids: HashMap<FileId, Vec<Uuid>>,
     errors: HashMap<FileId, Result<Warned<()>, EcoVec<SourceDiagnostic>>>,
     build_finished_event: Arc<Event>,
-    updates: broadcast::Sender<Vec<NoteData>>,
+    updates: broadcast::Sender<NoteUpdate>,
 }
 
 impl NotesServiceState {
@@ -51,6 +51,7 @@ impl NotesServiceState {
             links,
         }: NoteData,
     ) {
+        println!("Creating note with ID: {}", i);
         self.links.add_node(i);
 
         for j in links {
@@ -78,8 +79,12 @@ impl NotesServiceState {
                 );
                 self.ids.insert(file_id, Vec::with_capacity(output.len()));
 
-                for data in output {
+                for data in output.iter().cloned() {
                     self.create_note(file_id, data);
+                }
+
+                if self.build_finished_event.has_occured() && !output.is_empty() {
+                    let _ = self.updates.send(NoteUpdate::Update(output));
                 }
             }
             Err(error) => {
@@ -97,6 +102,7 @@ impl NotesServiceState {
             links,
         }: NoteData,
     ) {
+        println!("Updating note with ID: {}", i);
         let js: Vec<Uuid> = self.links.neighbors(i).collect();
 
         for j in js {
@@ -118,6 +124,8 @@ impl NotesServiceState {
             Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
         )>,
     ) {
+        let mut data: Vec<NoteData> = Vec::new();
+
         for (file_id, result) in updates {
             match result {
                 Ok(Warned { output, warnings }) => {
@@ -130,6 +138,8 @@ impl NotesServiceState {
                     );
                     self.ids.get_mut(&file_id).unwrap().clear();
 
+                    data.extend(output.iter().cloned());
+
                     for data in output {
                         self.update_note(file_id, data);
                     }
@@ -138,6 +148,10 @@ impl NotesServiceState {
                     self.errors.insert(file_id, Err(error));
                 }
             }
+        }
+
+        if self.build_finished_event.has_occured() && !data.is_empty() {
+            let _ = self.updates.send(NoteUpdate::Update(data));
         }
     }
 
@@ -170,6 +184,8 @@ impl NotesServiceState {
                 );
                 self.cancel.cancel();
             }
+
+            let _ = self.updates.send(NoteUpdate::Remove(is));
         }
     }
 
@@ -182,7 +198,7 @@ impl NotesServiceState {
         self.build_finished_event.clone()
     }
 
-    fn subscribe(&mut self) -> (Initialize, broadcast::Receiver<Vec<NoteData>>) {
+    fn subscribe(&mut self) -> (Initialize, broadcast::Receiver<NoteUpdate>) {
         let mut outgoing_links: HashMap<Uuid, Vec<Uuid>> =
             HashMap::with_capacity(self.links.node_count());
         let mut incoming_links: HashMap<Uuid, Vec<Uuid>> =
@@ -203,7 +219,7 @@ impl NotesServiceState {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NoteData {
     pub title: String,
     pub id: Uuid,
@@ -217,12 +233,10 @@ pub struct Initialize {
     pub titles: HashMap<Uuid, String>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "t", content = "c")]
+#[derive(Clone)]
 pub enum NoteUpdate {
-    Building,
-    Initialize(Initialize),
     Update(Vec<NoteData>),
+    Remove(Vec<Uuid>),
 }
 
 enum NotesMessage {
@@ -240,7 +254,7 @@ enum NotesMessage {
     RemoveNotes(FileId),
     SetBuildFinished,
     GetBuildFinished(oneshot::Sender<Arc<Event>>),
-    Subscribe(oneshot::Sender<(Initialize, broadcast::Receiver<Vec<NoteData>>)>),
+    Subscribe(oneshot::Sender<(Initialize, broadcast::Receiver<NoteUpdate>)>),
 }
 
 pub struct NotesService {
@@ -399,7 +413,7 @@ impl NotesServiceHandle {
 
     pub async fn subscribe(
         &self,
-    ) -> Result<(Initialize, broadcast::Receiver<Vec<NoteData>>), NotesServiceHandleError> {
+    ) -> Result<(Initialize, broadcast::Receiver<NoteUpdate>), NotesServiceHandleError> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(NotesMessage::Subscribe(sender))

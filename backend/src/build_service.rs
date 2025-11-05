@@ -142,6 +142,8 @@ impl BuildService {
             let _ = self.handle_create(id).await;
         }
 
+        let _ = self.notes_service.set_build_finished().await;
+
         self.watcher
             .watch(&self.project_directory, RecursiveMode::Recursive)?;
 
@@ -155,7 +157,7 @@ impl BuildService {
         tokio::select! {
             _ = self.start() => (),
             _ = cancel.cancelled() => {
-                println!("Build server actor cancelled");
+                println!("Build server cancelled");
                 self.receiver.close();
 
                 return
@@ -210,7 +212,7 @@ impl BuildService {
                     break
                 },
                 _ = cancel.cancelled() => {
-                    println!("Build server actor cancelled");
+                    println!("Build server cancelled");
                     self.receiver.close();
 
                     break
@@ -252,10 +254,16 @@ impl BuildService {
     }
 
     async fn handle_modify(&mut self, i: FileId) {
+        // TODO: Next we need to debug creates and updates until we get the
+        // behavior we're expecting all the way through. Then we can work on the
+        // UI in earnest.
+        println!("Handle modify: {:?}", i);
         let mut bfs = Bfs::new(&self.graph, i);
         let mut dependents = Vec::new();
 
         {
+            dependents.push(i);
+
             let mut slots = self.slots.lock();
 
             // Note: BFS starts by traversing i, so we don't need to do that manually
@@ -307,6 +315,8 @@ impl BuildService {
                 }
             }
         }
+
+        println!("{:?}", &results);
 
         let _ = self.notes_service.update_notes(results).await;
     }

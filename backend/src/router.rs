@@ -10,14 +10,16 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{any, get},
 };
-use bytes::Bytes;
 use http::{Response, StatusCode};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tower_http::cors;
 use uuid::Uuid;
 
-use crate::notes_service::{NoteUpdate, NotesServiceHandle, NotesServiceHandleError};
+use crate::notes_service::{
+    Initialize, NoteData, NoteUpdate, NotesServiceHandle, NotesServiceHandleError,
+};
 
 struct GetNoteContentResponse {
     result: Result<Result<Option<String>, io::Error>, NotesServiceHandleError>,
@@ -50,6 +52,15 @@ enum HandleUpdateError {
     NotesServiceError(NotesServiceHandleError),
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "tag", content = "content")]
+pub enum WebsocketMessage {
+    Building,
+    Initialize(Initialize),
+    Update(Vec<NoteData>),
+    Remove(Vec<Uuid>),
+}
+
 async fn handle_updates_helper(
     notes_service: NotesServiceHandle,
     mut socket: WebSocket,
@@ -60,11 +71,11 @@ async fn handle_updates_helper(
         .map_err(HandleUpdateError::NotesServiceError)?;
 
     if !build_finished.has_occured() {
-        let payload = NoteUpdate::Building;
-        let content = serde_json::to_vec(&payload).unwrap();
+        let payload = WebsocketMessage::Building;
+        let content = serde_json::to_string(&payload).unwrap();
 
         socket
-            .send(Message::Binary(Bytes::from(content)))
+            .send(Message::Text(content.into()))
             .await
             .map_err(HandleUpdateError::WebSocketError)?;
 
@@ -77,11 +88,11 @@ async fn handle_updates_helper(
         .map_err(HandleUpdateError::NotesServiceError)?;
 
     {
-        let payload = NoteUpdate::Initialize(initialize);
-        let content = serde_json::to_vec(&payload).unwrap();
+        let payload = WebsocketMessage::Initialize(initialize);
+        let content = serde_json::to_string(&payload).unwrap();
 
         socket
-            .send(Message::Binary(Bytes::from(content)))
+            .send(Message::Text(content.into()))
             .await
             .map_err(HandleUpdateError::WebSocketError)?;
     }
@@ -89,11 +100,14 @@ async fn handle_updates_helper(
     loop {
         match receiver.recv().await {
             Ok(update) => {
-                let payload = NoteUpdate::Update(update);
-                let content = serde_json::to_vec(&payload).unwrap();
+                let payload = match update {
+                    NoteUpdate::Update(updates) => WebsocketMessage::Update(updates),
+                    NoteUpdate::Remove(removes) => WebsocketMessage::Remove(removes),
+                };
+                let content = serde_json::to_string(&payload).unwrap();
 
                 socket
-                    .send(Message::Binary(Bytes::from(content)))
+                    .send(Message::Text(content.into()))
                     .await
                     .map_err(HandleUpdateError::WebSocketError)?;
             }
