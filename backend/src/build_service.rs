@@ -34,7 +34,7 @@ use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::{
-    notes_service::{CreateNoteMetadata, NotesServiceHandle},
+    notes_service::{NoteData, NotesServiceHandle},
     package::{ClientWrapper, HttpWrapper, PackageService, PackageStorage},
     system_world::{FileSlot, Resources, SystemWorld},
 };
@@ -312,14 +312,11 @@ impl BuildService {
     }
 
     async fn handle_remove(&mut self, i: FileId) {
-        // TODO: We should remove the associated fragments from the build
-        // directory, but only the notes service knows which uuids correspond to
-        // this source file. We should probably figure out a way to handle this.
-        // For now the build directory has extra crap until it gets cleaned out.
-
         self.graph.remove_node(i);
         self.is_source.remove(&i);
 
+        // Note, notes service handles clean up of fragment files in build
+        // directory.
         let _ = self.notes_service.remove_notes(i).await;
     }
 }
@@ -490,7 +487,7 @@ fn find_links(html: &Html) -> Vec<Uuid> {
         .collect()
 }
 
-type BuildOutputs = (Warned<Vec<CreateNoteMetadata>>, HashSet<FileId>);
+type BuildOutputs = (Warned<Vec<NoteData>>, HashSet<FileId>);
 
 async fn build<S>(
     resources: Arc<Resources>,
@@ -516,7 +513,7 @@ where
             .into_iter()
             .map(|(title, id, fragment)| {
                 let links = find_links(&fragment);
-                let output = CreateNoteMetadata { title, id, links };
+                let output = NoteData { title, id, links };
 
                 let content = fragment.html();
                 let path = build_subdirectory.join(format!("{}.html", id));

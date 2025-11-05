@@ -1,9 +1,12 @@
-use std::{collections::HashMap, io, path::PathBuf};
+use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 
-use petgraph::{Direction, prelude::DiGraphMap};
+use petgraph::prelude::DiGraphMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::{fs, sync::{mpsc, oneshot, broadcast}};
+use tokio::{
+    fs,
+    sync::{broadcast, mpsc, oneshot},
+};
 use tokio_util::sync::CancellationToken;
 use typst::{
     diag::{SourceDiagnostic, Warned},
@@ -12,18 +15,18 @@ use typst::{
 };
 use uuid::Uuid;
 
-pub const BUFFER_SIZE: usize = 64;
-
-// - We shouldn't send any websocket updates until the build server has compiled
-//   all the notes initially and we have an entire graph to send
+use crate::event::Event;
 
 struct NotesServiceState {
+    cancel: CancellationToken,
     links: DiGraphMap<Uuid, ()>,
     build_subdirectory: PathBuf,
-    metadata: HashMap<Uuid, (String, FileId)>,
-    file_ids: HashMap<FileId, Vec<Uuid>>,
+    titles: HashMap<Uuid, String>,
+    file_ids: HashMap<Uuid, FileId>,
+    ids: HashMap<FileId, Vec<Uuid>>,
     errors: HashMap<FileId, Result<Warned<()>, EcoVec<SourceDiagnostic>>>,
-    broadcast::Sender<_>
+    build_finished_event: Arc<Event>,
+    updates: broadcast::Sender<Vec<NoteData>>,
 }
 
 impl NotesServiceState {
@@ -39,36 +42,14 @@ impl NotesServiceState {
         }
     }
 
-    fn get_note_metadata(&mut self, id: Uuid) -> Option<GetNoteMetadata> {
-        if self.links.contains_node(id) {
-            let (title, _) = &self.metadata[&id];
-            let links = self
-                .links
-                .neighbors_directed(id, Direction::Outgoing)
-                .collect();
-            let backlinks = self
-                .links
-                .neighbors_directed(id, Direction::Incoming)
-                .collect();
-
-            Some(GetNoteMetadata {
-                title: title.clone(),
-                links,
-                backlinks,
-            })
-        } else {
-            None
-        }
-    }
-
     fn create_note(
         &mut self,
         file_id: FileId,
-        CreateNoteMetadata {
+        NoteData {
             title,
             id: i,
             links,
-        }: CreateNoteMetadata,
+        }: NoteData,
     ) {
         self.links.add_node(i);
 
@@ -76,14 +57,15 @@ impl NotesServiceState {
             self.links.add_edge(i, j, ());
         }
 
-        self.file_ids.get_mut(&file_id).unwrap().push(i);
-        self.metadata.insert(i, (title, file_id));
+        self.ids.get_mut(&file_id).unwrap().push(i);
+        self.titles.insert(i, title);
+        self.file_ids.insert(i, file_id);
     }
 
     fn create_notes(
         &mut self,
         file_id: FileId,
-        result: Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
+        result: Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
     ) {
         match result {
             Ok(Warned { output, warnings }) => {
@@ -94,8 +76,7 @@ impl NotesServiceState {
                         warnings,
                     }),
                 );
-                self.file_ids
-                    .insert(file_id, Vec::with_capacity(output.len()));
+                self.ids.insert(file_id, Vec::with_capacity(output.len()));
 
                 for data in output {
                     self.create_note(file_id, data);
@@ -110,11 +91,11 @@ impl NotesServiceState {
     fn update_note(
         &mut self,
         file_id: FileId,
-        CreateNoteMetadata {
+        NoteData {
             title,
             id: i,
             links,
-        }: CreateNoteMetadata,
+        }: NoteData,
     ) {
         let js: Vec<Uuid> = self.links.neighbors(i).collect();
 
@@ -125,18 +106,19 @@ impl NotesServiceState {
             self.links.add_edge(i, j, ());
         }
 
-        self.file_ids.get_mut(&file_id).unwrap().push(i);
-        self.metadata.insert(i, (title, file_id));
+        self.ids.get_mut(&file_id).unwrap().push(i);
+        self.titles.insert(i, title);
+        self.file_ids.insert(i, file_id);
     }
 
     fn update_notes(
         &mut self,
-        outputs: Vec<(
+        updates: Vec<(
             FileId,
-            Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
+            Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
         )>,
     ) {
-        for (file_id, result) in outputs {
+        for (file_id, result) in updates {
             match result {
                 Ok(Warned { output, warnings }) => {
                     self.errors.insert(
@@ -146,7 +128,7 @@ impl NotesServiceState {
                             warnings,
                         }),
                     );
-                    self.file_ids.get_mut(&file_id).unwrap().clear();
+                    self.ids.get_mut(&file_id).unwrap().clear();
 
                     for data in output {
                         self.update_note(file_id, data);
@@ -159,184 +141,139 @@ impl NotesServiceState {
         }
     }
 
-    fn remove_notes(&mut self, file_id: FileId) {
+    async fn remove_notes(&mut self, file_id: FileId) {
         self.errors.remove(&file_id);
-        if let Some(is) = self.file_ids.remove(&file_id) {
-            for i in is {
-                self.metadata.remove(&i);
-                self.links.remove_node(i);
+        if let Some(is) = self.ids.remove(&file_id) {
+            for i in is.iter() {
+                self.titles.remove(&i);
+                self.file_ids.remove(&i);
+                self.links.remove_node(*i);
+            }
+
+            let removes = is.iter().map(|i| {
+                let path = self.build_subdirectory.join(format!("{}.html", i));
+                fs::remove_file(path)
+            });
+
+            if let Err(error) = futures::future::join_all(removes)
+                .await
+                .into_iter()
+                .try_for_each(|result| result)
+            {
+                // Failed to remove fragments from build directory. This is
+                // fatal, so we need to tell the rest of the application to
+                // shutdown.
+
+                println!(
+                    "Failed to remove fragments from the build directory {}",
+                    error
+                );
+                self.cancel.cancel();
             }
         }
     }
+
+    // TODO: We need all three
+    fn set_build_finished(&mut self) {
+        self.build_finished_event.trigger();
+    }
+
+    fn get_build_finished(&mut self) -> Arc<Event> {
+        self.build_finished_event.clone()
+    }
+
+    fn subscribe(&mut self) -> (Initialize, broadcast::Receiver<Vec<NoteData>>) {
+        let mut outgoing_links: HashMap<Uuid, Vec<Uuid>> =
+            HashMap::with_capacity(self.links.node_count());
+        let mut incoming_links: HashMap<Uuid, Vec<Uuid>> =
+            HashMap::with_capacity(self.links.node_count());
+
+        for (u, v, _) in self.links.all_edges() {
+            outgoing_links.entry(u).or_default().push(v);
+            incoming_links.entry(v).or_default().push(u);
+        }
+
+        let initialize = Initialize {
+            outgoing_links,
+            incoming_links,
+            titles: self.titles.clone(),
+        };
+
+        (initialize, self.updates.subscribe())
+    }
 }
 
-trait Message<T> {
-    type Response;
-
-    async fn handle(&mut self, request: T) -> Self::Response;
-}
-
-struct GetNoteContentRequest {
-    pub id: Uuid,
-}
-
-struct GetNoteContentResponse {
-    pub result: Result<Option<String>, io::Error>,
-}
-
-struct GetNoteMetadataRequest {
-    pub id: Uuid,
-}
-
-struct GetNoteMetadataResponse {
-    pub result: Option<GetNoteMetadata>,
-}
-
-pub struct CreateNoteMetadata {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NoteData {
     pub title: String,
     pub id: Uuid,
     pub links: Vec<Uuid>,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct GetNoteMetadata {
-    pub title: String,
-    pub links: Vec<Uuid>,
-    pub backlinks: Vec<Uuid>,
+#[derive(Serialize, Deserialize)]
+pub struct Initialize {
+    pub outgoing_links: HashMap<Uuid, Vec<Uuid>>,
+    pub incoming_links: HashMap<Uuid, Vec<Uuid>>,
+    pub titles: HashMap<Uuid, String>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "t", content = "c")]
 pub enum NoteUpdate {
-    Update
-}
-
-pub struct CreateNotesRequest {
-    pub file_id: FileId,
-    pub result: Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
-}
-
-pub struct CreateNotesResponse {}
-
-pub struct UpdateNotesRequest {
-    pub outputs: Vec<(
-        FileId,
-        Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
-    )>,
-}
-
-pub struct UpdateNotesResponse {}
-
-pub struct RemoveNotesRequest {
-    pub file_id: FileId,
-}
-
-pub struct RemoveNotesResponse {}
-
-impl Message<GetNoteContentRequest> for NotesServiceState {
-    type Response = GetNoteContentResponse;
-
-    async fn handle(
-        &mut self,
-        GetNoteContentRequest { id }: GetNoteContentRequest,
-    ) -> Self::Response {
-        let result = self.get_note_content(id).await;
-
-        GetNoteContentResponse { result }
-    }
-}
-
-impl Message<GetNoteMetadataRequest> for NotesServiceState {
-    type Response = GetNoteMetadataResponse;
-
-    async fn handle(
-        &mut self,
-        GetNoteMetadataRequest { id }: GetNoteMetadataRequest,
-    ) -> Self::Response {
-        let result = self.get_note_metadata(id);
-
-        GetNoteMetadataResponse { result }
-    }
-}
-
-impl Message<CreateNotesRequest> for NotesServiceState {
-    type Response = CreateNotesResponse;
-
-    async fn handle(
-        &mut self,
-        CreateNotesRequest { file_id, result }: CreateNotesRequest,
-    ) -> Self::Response {
-        self.create_notes(file_id, result);
-
-        CreateNotesResponse {}
-    }
-}
-
-impl Message<RemoveNotesRequest> for NotesServiceState {
-    type Response = RemoveNotesResponse;
-
-    async fn handle(
-        &mut self,
-        RemoveNotesRequest { file_id }: RemoveNotesRequest,
-    ) -> Self::Response {
-        self.remove_notes(file_id);
-
-        RemoveNotesResponse {}
-    }
-}
-
-impl Message<UpdateNotesRequest> for NotesServiceState {
-    type Response = UpdateNotesResponse;
-
-    async fn handle(
-        &mut self,
-        UpdateNotesRequest { outputs }: UpdateNotesRequest,
-    ) -> Self::Response {
-        self.update_notes(outputs);
-
-        UpdateNotesResponse {}
-    }
+    Building,
+    Initialize(Initialize),
+    Update(Vec<NoteData>),
 }
 
 enum NotesMessage {
-    GetNoteContent(
-        GetNoteContentRequest,
-        oneshot::Sender<GetNoteContentResponse>,
+    GetNoteContent(Uuid, oneshot::Sender<Result<Option<String>, io::Error>>),
+    CreateNotes(
+        FileId,
+        Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
     ),
-    GetNoteMetadata(
-        GetNoteMetadataRequest,
-        oneshot::Sender<GetNoteMetadataResponse>,
+    UpdateNotes(
+        Vec<(
+            FileId,
+            Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
+        )>,
     ),
-    CreateNotes(CreateNotesRequest),
-    UpdateNotes(UpdateNotesRequest),
-    RemoveNotes(RemoveNotesRequest),
+    RemoveNotes(FileId),
+    SetBuildFinished,
+    GetBuildFinished(oneshot::Sender<Arc<Event>>),
+    Subscribe(oneshot::Sender<(Initialize, broadcast::Receiver<Vec<NoteData>>)>),
 }
 
 pub struct NotesService {
     receiver: mpsc::Receiver<NotesMessage>,
     state: NotesServiceState,
-    cancel: CancellationToken,
 }
 
 impl NotesService {
     async fn handle(&mut self, message: NotesMessage) {
         match message {
-            NotesMessage::GetNoteContent(request, sender) => {
-                let response = self.state.handle(request).await;
+            NotesMessage::GetNoteContent(uuid, sender) => {
+                let response = self.state.get_note_content(uuid).await;
                 let _ = sender.send(response);
             }
-            NotesMessage::GetNoteMetadata(request, sender) => {
-                let response = self.state.handle(request).await;
-                let _ = sender.send(response);
+            NotesMessage::CreateNotes(file_id, result) => {
+                self.state.create_notes(file_id, result);
             }
-            NotesMessage::CreateNotes(request) => {
-                self.state.handle(request).await;
+            NotesMessage::UpdateNotes(updates) => {
+                self.state.update_notes(updates);
             }
-            NotesMessage::UpdateNotes(request) => {
-                self.state.handle(request).await;
+            NotesMessage::RemoveNotes(file_id) => {
+                self.state.remove_notes(file_id).await;
             }
-            NotesMessage::RemoveNotes(request) => {
-                self.state.handle(request).await;
+            NotesMessage::SetBuildFinished => {
+                self.state.set_build_finished();
+            }
+            NotesMessage::GetBuildFinished(sender) => {
+                let event = self.state.get_build_finished();
+                let _ = sender.send(event);
+            }
+            NotesMessage::Subscribe(sender) => {
+                let result = self.state.subscribe();
+                let _ = sender.send(result);
             }
         }
     }
@@ -349,7 +286,7 @@ impl NotesService {
                 } else {
                     break
                 },
-                _ = self.cancel.cancelled() => {
+                _ = self.state.cancel.cancelled() => {
                     println!("Notes service cancel");
                     self.receiver.close();
 
@@ -389,29 +326,12 @@ impl NotesServiceHandle {
         id: Uuid,
     ) -> Result<Result<Option<String>, io::Error>, NotesServiceHandleError> {
         let (sender, receiver) = oneshot::channel();
-        let message = NotesMessage::GetNoteContent(GetNoteContentRequest { id }, sender);
+        let message = NotesMessage::GetNoteContent(id, sender);
         self.sender
             .send(message)
             .await
             .map_err(|_| NotesServiceHandleError::Send)?;
-        let GetNoteContentResponse { result } = receiver
-            .await
-            .map_err(|_| NotesServiceHandleError::Receive)?;
-
-        Ok(result)
-    }
-
-    pub async fn get_note_metadata(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<GetNoteMetadata>, NotesServiceHandleError> {
-        let (sender, receiver) = oneshot::channel();
-        let message = NotesMessage::GetNoteMetadata(GetNoteMetadataRequest { id }, sender);
-        self.sender
-            .send(message)
-            .await
-            .map_err(|_| NotesServiceHandleError::Send)?;
-        let GetNoteMetadataResponse { result } = receiver
+        let result = receiver
             .await
             .map_err(|_| NotesServiceHandleError::Receive)?;
 
@@ -421,9 +341,9 @@ impl NotesServiceHandle {
     pub async fn create_notes(
         &self,
         file_id: FileId,
-        result: Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
+        result: Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
     ) -> Result<(), NotesServiceHandleError> {
-        let message = NotesMessage::CreateNotes(CreateNotesRequest { file_id, result });
+        let message = NotesMessage::CreateNotes(file_id, result);
         self.sender
             .send(message)
             .await
@@ -434,12 +354,12 @@ impl NotesServiceHandle {
 
     pub async fn update_notes(
         &self,
-        outputs: Vec<(
+        updates: Vec<(
             FileId,
-            Result<Warned<Vec<CreateNoteMetadata>>, EcoVec<SourceDiagnostic>>,
+            Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
         )>,
     ) -> Result<(), NotesServiceHandleError> {
-        let message = NotesMessage::UpdateNotes(UpdateNotesRequest { outputs });
+        let message = NotesMessage::UpdateNotes(updates);
         self.sender
             .send(message)
             .await
@@ -449,7 +369,7 @@ impl NotesServiceHandle {
     }
 
     pub async fn remove_notes(&self, file_id: FileId) -> Result<(), NotesServiceHandleError> {
-        let message = NotesMessage::RemoveNotes(RemoveNotesRequest { file_id });
+        let message = NotesMessage::RemoveNotes(file_id);
         self.sender
             .send(message)
             .await
@@ -458,23 +378,57 @@ impl NotesServiceHandle {
         Ok(())
     }
 
+    pub async fn set_build_finished(&self) -> Result<(), NotesServiceHandleError> {
+        self.sender
+            .send(NotesMessage::SetBuildFinished)
+            .await
+            .map_err(|_| NotesServiceHandleError::Send)?;
+
+        Ok(())
+    }
+
+    pub async fn get_build_finished(&self) -> Result<Arc<Event>, NotesServiceHandleError> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(NotesMessage::GetBuildFinished(sender))
+            .await
+            .map_err(|_| NotesServiceHandleError::Send)?;
+
+        receiver.await.map_err(|_| NotesServiceHandleError::Receive)
+    }
+
+    pub async fn subscribe(
+        &self,
+    ) -> Result<(Initialize, broadcast::Receiver<Vec<NoteData>>), NotesServiceHandleError> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(NotesMessage::Subscribe(sender))
+            .await
+            .map_err(|_| NotesServiceHandleError::Send)?;
+
+        receiver.await.map_err(|_| NotesServiceHandleError::Receive)
+    }
+
     pub fn build(
         cancel: CancellationToken,
         build_subdirectory: PathBuf,
     ) -> (NotesServiceHandle, NotesService) {
+        pub const BUFFER_SIZE: usize = 64;
+
         let (sender, receiver) = mpsc::channel(BUFFER_SIZE);
+        let (updates, _) = broadcast::channel(BUFFER_SIZE);
         let state = NotesServiceState {
+            cancel: cancel,
             build_subdirectory,
             links: DiGraphMap::default(),
-            metadata: HashMap::default(),
+            ids: HashMap::default(),
+            titles: HashMap::default(),
             file_ids: HashMap::default(),
             errors: HashMap::default(),
+            build_finished_event: Event::new(),
+            updates,
         };
-        let service = NotesService {
-            state,
-            receiver,
-            cancel,
-        };
+        let service = NotesService { state, receiver };
         let handle = NotesServiceHandle { sender };
 
         (handle, service)

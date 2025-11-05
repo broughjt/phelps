@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use thiserror::Error;
 use time::{UtcDateTime, UtcOffset};
 use typst::{
-    Feature, Features, Library, World,
+    Feature, Features, Library, LibraryExt, World,
     diag::{FileError, FileResult, PackageError},
     foundations::{Bytes, Datetime},
     syntax::{FileId, Source},

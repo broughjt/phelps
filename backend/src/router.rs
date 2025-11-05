@@ -1,17 +1,23 @@
 use std::io;
 
 use axum::{
-    Json, Router,
+    Router,
     body::Body,
-    extract::{Path, State, ws},
+    extract::{
+        Path, State,
+        ws::{self, Message, WebSocket},
+    },
     response::{Html, IntoResponse},
     routing::{any, get},
 };
+use bytes::Bytes;
 use http::{Response, StatusCode};
+use thiserror::Error;
+use tokio::sync::broadcast;
 use tower_http::cors;
 use uuid::Uuid;
 
-use crate::notes_service::{GetNoteMetadata, NotesServiceHandle, NotesServiceHandleError};
+use crate::notes_service::{NoteUpdate, NotesServiceHandle, NotesServiceHandleError};
 
 struct GetNoteContentResponse {
     result: Result<Result<Option<String>, io::Error>, NotesServiceHandleError>,
@@ -36,42 +42,77 @@ async fn get_note_content(
     GetNoteContentResponse { result }
 }
 
-struct GetNoteMetadataResponse {
-    result: Result<Option<GetNoteMetadata>, NotesServiceHandleError>,
+#[derive(Debug, Error)]
+enum HandleUpdateError {
+    #[error("WebSocket error: {0}")]
+    WebSocketError(axum::Error),
+    #[error("NotesService error: {0}")]
+    NotesServiceError(NotesServiceHandleError),
 }
 
-impl IntoResponse for GetNoteMetadataResponse {
-    fn into_response(self) -> Response<Body> {
-        match self.result {
-            Ok(Some(metadata)) => IntoResponse::into_response(Json(metadata)),
-            Ok(None) => IntoResponse::into_response(StatusCode::NOT_FOUND),
-            Err(_) => IntoResponse::into_response(StatusCode::INTERNAL_SERVER_ERROR),
+async fn handle_updates_helper(
+    notes_service: NotesServiceHandle,
+    mut socket: WebSocket,
+) -> Result<(), HandleUpdateError> {
+    let build_finished = notes_service
+        .get_build_finished()
+        .await
+        .map_err(HandleUpdateError::NotesServiceError)?;
+
+    if !build_finished.has_occured() {
+        let payload = NoteUpdate::Building;
+        let content = serde_json::to_vec(&payload).unwrap();
+
+        socket
+            .send(Message::Binary(Bytes::from(content)))
+            .await
+            .map_err(HandleUpdateError::WebSocketError)?;
+
+        build_finished.wait().await;
+    }
+
+    let (initialize, mut receiver) = notes_service
+        .subscribe()
+        .await
+        .map_err(HandleUpdateError::NotesServiceError)?;
+
+    {
+        let payload = NoteUpdate::Initialize(initialize);
+        let content = serde_json::to_vec(&payload).unwrap();
+
+        socket
+            .send(Message::Binary(Bytes::from(content)))
+            .await
+            .map_err(HandleUpdateError::WebSocketError)?;
+    }
+
+    loop {
+        match receiver.recv().await {
+            Ok(update) => {
+                let payload = NoteUpdate::Update(update);
+                let content = serde_json::to_vec(&payload).unwrap();
+
+                socket
+                    .send(Message::Binary(Bytes::from(content)))
+                    .await
+                    .map_err(HandleUpdateError::WebSocketError)?;
+            }
+            Err(broadcast::error::RecvError::Lagged(lag_error)) => {
+                panic!("Lag error occurred {:?}", lag_error);
+            }
+            Err(broadcast::error::RecvError::Closed) => break Ok(()),
         }
     }
-}
-
-async fn get_note_metadata(
-    State(notes_service): State<NotesServiceHandle>,
-    Path(id): Path<Uuid>,
-) -> GetNoteMetadataResponse {
-    let result = notes_service.get_note_metadata(id).await;
-
-    GetNoteMetadataResponse { result }
 }
 
 async fn handle_updates(
     State(notes_service): State<NotesServiceHandle>,
     websocket: ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
-    websocket.on_upgrade(async |socket| {
-        // let (sender, receiver) = socket.split();
-
-        // TODO: Just have a pure server sent thing that sends everything. The
-        // client connects once at the beginning, gets an initial graph, and
-        // then receives all updates
-
-        // Then the only other method is get content, which gets called when
-        // content gets replaced (client finds out about this through websocket)
+    websocket.on_upgrade(async move |socket| {
+        if let Err(error) = handle_updates_helper(notes_service, socket).await {
+            println!("Error in websocket handler: {:?}", error);
+        }
     })
 }
 
@@ -83,7 +124,6 @@ pub fn router(actor: NotesServiceHandle) -> Router<()> {
 
     Router::new()
         .route("/api/notes/{id}/content", get(get_note_content))
-        .route("/api/notes/{id}/metadata", get(get_note_metadata))
         .route("/api/updates", any(handle_updates))
         .with_state(actor)
         .layer(cors)
