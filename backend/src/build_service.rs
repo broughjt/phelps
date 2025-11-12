@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 use bytes::Buf;
@@ -16,7 +17,10 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use markup5ever::{LocalName, QualName, ns};
-use notify::{Event, EventHandler, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify_debouncer_full::{
+    DebounceEventHandler, DebounceEventResult, Debouncer, RecommendedCache, new_debouncer,
+    notify::{self, RecommendedWatcher},
+};
 use parking_lot::Mutex;
 use petgraph::{Direction, prelude::DiGraphMap, visit::Bfs};
 use scraper::{ElementRef, Html, Node, Selector};
@@ -39,10 +43,10 @@ use crate::{
     system_world::{FileSlot, Resources, SystemWorld},
 };
 
-pub struct MpscWrapper(pub mpsc::Sender<Result<Event, notify::Error>>);
+pub struct MpscWrapper(pub mpsc::Sender<DebounceEventResult>);
 
-impl EventHandler for MpscWrapper {
-    fn handle_event(&mut self, result: Result<Event, notify::Error>) {
+impl DebounceEventHandler for MpscWrapper {
+    fn handle_event(&mut self, result: DebounceEventResult) {
         let _ = self.0.blocking_send(result);
     }
 }
@@ -58,8 +62,8 @@ pub struct BuildService {
     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
     is_source: HashSet<FileId>,
     notes_service: NotesServiceHandle,
-    receiver: mpsc::Receiver<Result<Event, notify::Error>>,
-    watcher: RecommendedWatcher,
+    receiver: mpsc::Receiver<DebounceEventResult>,
+    watcher: Debouncer<RecommendedWatcher, RecommendedCache>,
     cancel: CancellationToken,
     graph: DiGraphMap<FileId, ()>,
 }
@@ -78,6 +82,8 @@ impl BuildService {
         cancel: CancellationToken,
     ) -> Result<Self, notify::Error> {
         const BUFFER_SIZE: usize = 128;
+        const DEBOUNCE_TIMEOUT: Duration = Duration::from_millis(500);
+
         let (sender, receiver) = mpsc::channel(BUFFER_SIZE);
 
         let https = HttpsConnectorBuilder::new()
@@ -99,7 +105,8 @@ impl BuildService {
         let graph = DiGraphMap::new();
         let is_source = HashSet::new();
 
-        let watcher = RecommendedWatcher::new(MpscWrapper(sender), Default::default())?;
+        // let watcher = RecommendedWatcher::new(MpscWrapper(sender), Default::default())?;
+        let watcher = new_debouncer(DEBOUNCE_TIMEOUT, None, MpscWrapper(sender))?;
 
         Ok(Self {
             receiver,
@@ -145,7 +152,7 @@ impl BuildService {
         let _ = self.notes_service.set_build_finished().await;
 
         self.watcher
-            .watch(&self.project_directory, RecursiveMode::Recursive)?;
+            .watch(&self.project_directory, notify::RecursiveMode::Recursive)?;
 
         Ok(())
     }
@@ -167,45 +174,50 @@ impl BuildService {
         loop {
             tokio::select! {
                 option = self.receiver.recv() => if let Some(result) = option {
-                    if let Ok(event) = result {
-                        match event.kind {
-                            EventKind::Access(_) | EventKind::Any | EventKind::Other => (),
-                            EventKind::Create(_) => {
-                                assert_eq!(event.paths.len(), 1);
+                    if let Ok(events) = result {
 
-                                let path = &event.paths[0];
-                                let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
-                                let id = FileId::new(None, virtual_path);
+                        for event in events {
+                            use notify::EventKind;
 
-                                if id.package().is_none()
-                                    && path.extension().is_some_and(|e| e == "typ")
-                                    && path.strip_prefix(&self.notes_subdirectory).is_ok() {
-                                    self.handle_create(id).await;
-                                }
-                            },
-                            EventKind::Modify(_) => {
-                                assert_eq!(event.paths.len(), 1); // TODO
+                            match event.kind {
+                                EventKind::Access(_) | EventKind::Any | EventKind::Other => (),
+                                EventKind::Create(_) => {
+                                    assert_eq!(event.paths.len(), 1);
 
-                                let path = &event.paths[0];
-                                let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
-                                let id = FileId::new(None, virtual_path);
-                                let is_source = id.package().is_none()
-                                    && path.extension().is_some_and(|e| e == "typ")
-                                    && path.strip_prefix(&self.notes_subdirectory).is_ok();
+                                    let path = &event.paths[0];
+                                    let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
+                                    let id = FileId::new(None, virtual_path);
 
-                                if self.graph.contains_node(id) || is_source {
-                                    self.handle_modify(id).await;
-                                }
-                            },
-                            EventKind::Remove(_) => {
-                                assert_eq!(event.paths.len(), 1);
+                                    if id.package().is_none()
+                                        && path.extension().is_some_and(|e| e == "typ")
+                                        && path.strip_prefix(&self.notes_subdirectory).is_ok() {
+                                        self.handle_create(id).await;
+                                    }
+                                },
+                                EventKind::Modify(_) => {
+                                    assert_eq!(event.paths.len(), 1); // TODO
 
-                                let path = &event.paths[0];
-                                let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
-                                let id = FileId::new(None, virtual_path);
+                                    let path = &event.paths[0];
+                                    let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
+                                    let id = FileId::new(None, virtual_path);
+                                    let is_source = id.package().is_none()
+                                        && path.extension().is_some_and(|e| e == "typ")
+                                        && path.strip_prefix(&self.notes_subdirectory).is_ok();
 
-                                self.handle_remove(id).await;
-                            },
+                                    if self.graph.contains_node(id) || is_source {
+                                        self.handle_modify(id).await;
+                                    }
+                                },
+                                EventKind::Remove(_) => {
+                                    assert_eq!(event.paths.len(), 1);
+
+                                    let path = &event.paths[0];
+                                    let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
+                                    let id = FileId::new(None, virtual_path);
+
+                                    self.handle_remove(id).await;
+                                },
+                            }
                         }
                     }
                 } else {
@@ -257,7 +269,6 @@ impl BuildService {
         // TODO: Next we need to debug creates and updates until we get the
         // behavior we're expecting all the way through. Then we can work on the
         // UI in earnest.
-        println!("Handle modify: {:?}", i);
         let mut bfs = Bfs::new(&self.graph, i);
         let mut dependents = Vec::new();
 
@@ -315,8 +326,6 @@ impl BuildService {
                 }
             }
         }
-
-        println!("{:?}", &results);
 
         let _ = self.notes_service.update_notes(results).await;
     }

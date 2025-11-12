@@ -51,7 +51,6 @@ impl NotesServiceState {
             links,
         }: NoteData,
     ) {
-        println!("Creating note with ID: {}", i);
         self.links.add_node(i);
 
         for j in links {
@@ -102,7 +101,6 @@ impl NotesServiceState {
             links,
         }: NoteData,
     ) {
-        println!("Updating note with ID: {}", i);
         let js: Vec<Uuid> = self.links.neighbors(i).collect();
 
         for j in js {
