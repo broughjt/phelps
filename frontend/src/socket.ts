@@ -1,21 +1,42 @@
-export function initializeWebSocket() {
-  const socket = new WebSocket("ws://localhost:3000/api/updates");
+import { Action, Initialize, Update } from "./reducer";
 
-  socket.onopen = () => {
-    console.log("WebSocket connection established");
+type WebsocketMessage =
+  | {
+      tag: "building";
+    }
+  | {
+      tag: "initialize";
+      content: Initialize;
+    }
+  | {
+      tag: "update";
+      content: Update[];
+    }
+  | {
+      tag: "remove";
+      content: string[];
+    };
+
+export function handleSocketMessage(dispatch: (_: Action) => void) {
+  return (event: MessageEvent) => {
+    // TODO: Handle the possibility that returned JSON is not a valid
+    // WebsocketMessage
+    const message: WebsocketMessage = JSON.parse(event.data);
+    console.log(message);
+
+    switch (message.tag) {
+      case "building":
+        dispatch({ type: "building" });
+        break;
+      case "initialize":
+        dispatch({ type: "initialize", payload: message.content });
+        break;
+      case "update":
+        dispatch({ type: "update", payload: message.content });
+        break;
+      case "remove":
+        dispatch({ type: "remove", payload: message.content });
+        break;
+    }
   };
-
-  socket.onmessage = (event) => {
-    console.log("WebSocket message received:", event.data);
-  };
-
-  socket.onclose = () => {
-    console.log("WebSocket connection closed");
-  };
-
-  socket.onerror = (error) => {
-    console.error("WebSocket error:", error);
-  };
-
-  return socket;
 }

@@ -13,6 +13,7 @@
     "@fontsource/inter": "^5.2.7",
     "@fontsource/libertinus-serif": "^5.2.1",
     "@fontsource/libertinus-serif-display": "^5.2.1",
+    "immer": "^10.2.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "wouter": "^3.7.1"

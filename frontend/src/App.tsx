@@ -1,81 +1,54 @@
-import "./App.css";
+import { useEffect, useReducer } from "react";
+import { initialState, reducer } from "./reducer";
+import { handleSocketMessage } from "./socket";
 import { Route, Switch } from "wouter";
-import NotePage from "./NotePage.tsx";
-import { useReducer, useEffect } from "react";
-import { initializeWebSocket } from "./socket.ts";
-import { Graph, updateNodeEdges } from "./graph.ts";
-
-type State = {
-  graph: Graph;
-  // TODO: Change to more stuff if/when needed
-  titles: Map<string, string>;
-};
-
-type Action = {
-  type: "update";
-  payload: {
-    id: string;
-    title: string;
-    links: string[];
-    backlinks: string[];
-  };
-};
-
-function reducer(state: State, action: Action): State {
-  switch (action.type) {
-    case "update": {
-      const { id, title, links, backlinks } = action.payload;
-      const newGraph = updateNodeEdges(
-        state.graph,
-        id,
-        new Set(links),
-        new Set(backlinks),
-      );
-      const newTitles = new Map(state.titles);
-      newTitles.set(id, title);
-      return {
-        graph: newGraph,
-        titles: newTitles,
-      };
-    }
-    default:
-      return state;
-  }
-}
-
-const initialState: State = {
-  graph: { outgoing: new Map(), incoming: new Map() },
-  titles: new Map(),
-};
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
 
   useEffect(() => {
-    const socket = initializeWebSocket();
+    const socket = new WebSocket("ws://localhost:3000/api/updates");
+
+    socket.onclose = () => {
+      console.log("WebSocket connection closed");
+    };
+    socket.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
+
+    socket.onmessage = handleSocketMessage(dispatch);
+
     return () => {
       socket.close();
     };
   }, []);
 
+  const notFound = <div>404, Not Found!</div>;
+
   return (
     <Switch>
       <Route path="/note/:id">
         {({ id }) => {
-          // TODO: Show a proper loading page not this nonsense
-          const title = state.titles.get(id) ?? "Loading...";
-          const links = state.graph.outgoing.get(id) ?? new Set();
-          const backlinks = state.graph.incoming.get(id) ?? new Set();
-          return (
-            <NotePage
-              id={id}
-              title={title}
-              links={links}
-              backlinks={backlinks}
-            />
-          );
+          // // TODO: Show a proper loading page not this nonsense
+          // // const title = state.titles.get(id) ?? "Loading...";
+          // // const links = state.graph.outgoing.get(id) ?? new Set();
+          // // const backlinks = state.graph.incoming.get(id) ?? new Set();
+          // return (
+          //   <NotePage
+          //     id={id}
+          //     title={title}
+          //     links={links}
+          //     backlinks={backlinks}
+          //   />
+          // );
+          if (state.graph.hasNode(id)) {
+            <p>Hello, world</p>;
+          } else {
+            return notFound;
+          }
         }}
       </Route>
+      <Route>{notFound}</Route>
     </Switch>
   );
 }
