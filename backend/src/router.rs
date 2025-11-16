@@ -55,9 +55,13 @@ enum HandleUpdateError {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "tag", content = "content")]
 pub enum WebsocketMessage {
+    #[serde(rename(serialize = "building"))]
     Building,
+    #[serde(rename(serialize = "initialize"))]
     Initialize(Initialize),
+    #[serde(rename(serialize = "update"))]
     Update(Vec<NoteData>),
+    #[serde(rename(serialize = "remove"))]
     Remove(Vec<Uuid>),
 }
 

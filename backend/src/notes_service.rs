@@ -199,17 +199,13 @@ impl NotesServiceState {
     fn subscribe(&mut self) -> (Initialize, broadcast::Receiver<NoteUpdate>) {
         let mut outgoing_links: HashMap<Uuid, Vec<Uuid>> =
             HashMap::with_capacity(self.links.node_count());
-        let mut incoming_links: HashMap<Uuid, Vec<Uuid>> =
-            HashMap::with_capacity(self.links.node_count());
 
         for (u, v, _) in self.links.all_edges() {
             outgoing_links.entry(u).or_default().push(v);
-            incoming_links.entry(v).or_default().push(u);
         }
 
         let initialize = Initialize {
             outgoing_links,
-            incoming_links,
             titles: self.titles.clone(),
         };
 
@@ -227,7 +223,6 @@ pub struct NoteData {
 #[derive(Serialize, Deserialize)]
 pub struct Initialize {
     pub outgoing_links: HashMap<Uuid, Vec<Uuid>>,
-    pub incoming_links: HashMap<Uuid, Vec<Uuid>>,
     pub titles: HashMap<Uuid, String>,
 }
 
