@@ -1,6 +1,6 @@
 use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 
-use petgraph::{prelude::DiGraphMap, stable_graph::Neighbors};
+use petgraph::prelude::DiGraphMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
@@ -429,7 +429,7 @@ impl NotesServiceHandle {
         let (sender, receiver) = mpsc::channel(BUFFER_SIZE);
         let (updates, _) = broadcast::channel(BUFFER_SIZE);
         let state = NotesServiceState {
-            cancel: cancel,
+            cancel,
             build_subdirectory,
             default_note,
             links: DiGraphMap::default(),

@@ -2,7 +2,7 @@ use std::error::Error;
 
 use clap::Parser;
 use phelps::build_service::BuildService;
-use phelps::{notes_service::NotesServiceHandle, router::router};
+use phelps::{http_service::router, notes_service::NotesServiceHandle};
 use tokio::runtime::Runtime;
 use tokio::{net::TcpListener, signal};
 
@@ -41,7 +41,7 @@ fn watch(config: Config) -> Result<(), Box<dyn Error>> {
             config.build_subdirectory.clone(),
             config.default_note,
         );
-        let build_server = BuildService::try_build(
+        let build_service = BuildService::try_build(
             config.project_directory,
             config.notes_subdirectory,
             config.build_subdirectory,
@@ -52,16 +52,22 @@ fn watch(config: Config) -> Result<(), Box<dyn Error>> {
             cancel.clone(),
         )?;
 
-        tracker.spawn(build_server.run());
+        tracker.spawn(build_service.run());
         tracker.spawn(notes_service.run());
 
         let router = router(notes_service_handle);
         let listener = TcpListener::bind("127.0.0.1:3000").await?;
         let http = axum::serve(listener, router)
-            .with_graceful_shutdown(cancel.cancelled_owned())
+            .with_graceful_shutdown(cancel.cancelled())
             .into_future();
 
         tracker.spawn(http);
+
+        let listener = TcpListener::bind("127.0.0.1:3001").await?;
+        let editor_service = todo!();
+        let editor = EditorListener::new(listener, editor_service, cancel.cancelled_owned());
+
+        tracker.spawn(editor);
 
         tracker.close();
         tracker.wait().await;

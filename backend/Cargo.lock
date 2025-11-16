@@ -2226,6 +2226,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.9.8",
+ "tower",
  "tower-async",
  "tower-http",
  "typst",
@@ -3531,6 +3532,8 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57d4b9f1f79aa6c44c843b7c52f55e0a4aa3f39f16fcf9b57e5f6ee6e9b92253"
 dependencies = [
+ "futures-util",
+ "tokio",
  "tower-async-layer",
  "tower-async-service",
 ]
