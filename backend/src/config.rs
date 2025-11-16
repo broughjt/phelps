@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use serde_derive::Deserialize;
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -20,6 +21,7 @@ pub enum Commands {
 #[derive(Debug, Deserialize)]
 pub struct ConfigToml {
     pub project_directory: PathBuf,
+    pub default_note: Uuid,
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +31,7 @@ pub struct Config {
     pub project_directory: PathBuf,
     pub notes_subdirectory: PathBuf,
     pub build_subdirectory: PathBuf,
+    pub default_note: Uuid,
 }
 
 #[derive(Debug, Error)]
@@ -55,8 +58,10 @@ impl Config {
 
         let config_path: PathBuf = project_directories.config_dir().join("config.toml");
         let contents = fs::read_to_string(&config_path).map_err(ConfigError::ConfigRead)?;
-        let ConfigToml { project_directory } =
-            toml::from_str(&contents).map_err(ConfigError::ConfigParse)?;
+        let ConfigToml {
+            project_directory,
+            default_note,
+        } = toml::from_str(&contents).map_err(ConfigError::ConfigParse)?;
 
         let notes_subdirectory = project_directory.join("notes");
         let build_subdirectory = project_directory.join("build");
@@ -74,6 +79,7 @@ impl Config {
             project_directory,
             notes_subdirectory,
             build_subdirectory,
+            default_note,
         })
     }
 }

@@ -67,7 +67,15 @@ export class Graph {
     delete this.incoming[i];
   }
 
-  hasNode(i: string) {
+  hasNode(i: string): boolean {
     return this.outgoing[i] !== undefined;
+  }
+
+  outgoingEdges(i: string): Set<string> | undefined {
+    return this.outgoing[i];
+  }
+
+  incomingEdges(i: string): Set<string> | undefined {
+    return this.incoming[i];
   }
 }

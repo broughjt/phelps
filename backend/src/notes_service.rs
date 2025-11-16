@@ -1,6 +1,6 @@
 use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 
-use petgraph::prelude::DiGraphMap;
+use petgraph::{prelude::DiGraphMap, stable_graph::Neighbors};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
@@ -21,6 +21,7 @@ struct NotesServiceState {
     cancel: CancellationToken,
     links: DiGraphMap<Uuid, ()>,
     build_subdirectory: PathBuf,
+    default_note: Uuid,
     titles: HashMap<Uuid, String>,
     file_ids: HashMap<Uuid, FileId>,
     ids: HashMap<FileId, Vec<Uuid>>,
@@ -187,7 +188,6 @@ impl NotesServiceState {
         }
     }
 
-    // TODO: We need all three
     fn set_build_finished(&mut self) {
         self.build_finished_event.trigger();
     }
@@ -200,13 +200,15 @@ impl NotesServiceState {
         let mut outgoing_links: HashMap<Uuid, Vec<Uuid>> =
             HashMap::with_capacity(self.links.node_count());
 
-        for (u, v, _) in self.links.all_edges() {
-            outgoing_links.entry(u).or_default().push(v);
+        for u in self.links.nodes() {
+            let neighbors = self.links.neighbors(u).collect();
+            outgoing_links.insert(u, neighbors);
         }
 
         let initialize = Initialize {
             outgoing_links,
             titles: self.titles.clone(),
+            default_note: self.default_note,
         };
 
         (initialize, self.updates.subscribe())
@@ -224,6 +226,7 @@ pub struct NoteData {
 pub struct Initialize {
     pub outgoing_links: HashMap<Uuid, Vec<Uuid>>,
     pub titles: HashMap<Uuid, String>,
+    pub default_note: Uuid,
 }
 
 #[derive(Clone)]
@@ -419,6 +422,7 @@ impl NotesServiceHandle {
     pub fn build(
         cancel: CancellationToken,
         build_subdirectory: PathBuf,
+        default_note: Uuid,
     ) -> (NotesServiceHandle, NotesService) {
         pub const BUFFER_SIZE: usize = 64;
 
@@ -427,6 +431,7 @@ impl NotesServiceHandle {
         let state = NotesServiceState {
             cancel: cancel,
             build_subdirectory,
+            default_note,
             links: DiGraphMap::default(),
             ids: HashMap::default(),
             titles: HashMap::default(),

@@ -1,25 +1,41 @@
-import { JSX, memo } from "react";
+import { JSX } from "react";
 import "./NotePage.css";
+import { NoteContent } from "./NoteContent";
 
-type NotePageProps = {
+type NotePageProperties = {
   id: string;
   title: string;
-  links: Set<string>;
-  backlinks: Set<string>;
+  backlinks: Record<string, string>;
+  status: "loaded" | "dirty" | "loading";
+  html: string | null;
+  fetchNoteContent: (id: string) => Promise<void>;
 };
 
-function NotePage({ title, backlinks }: NotePageProps): JSX.Element {
+export function NotePage({
+  id,
+  title,
+  backlinks,
+  status,
+  html,
+  fetchNoteContent,
+}: NotePageProperties): JSX.Element {
   return (
     <div className="layout">
       <article>
         <h1>{title}</h1>
+        <NoteContent
+          id={id}
+          status={status}
+          html={html}
+          fetchNoteContent={fetchNoteContent}
+        />
       </article>
       <aside>
         <h2>Backlinks</h2>
         <ul>
-          {Array.from(backlinks).map((backlink) => (
-            <li key={backlink}>
-              <a href={`/note/${backlink}`}>{backlink}</a>
+          {Object.entries(backlinks).map(([id, title]) => (
+            <li key={id}>
+              <a href={`/note/${id}`}>{title}</a>
             </li>
           ))}
         </ul>
@@ -28,5 +44,3 @@ function NotePage({ title, backlinks }: NotePageProps): JSX.Element {
     </div>
   );
 }
-
-export default memo(NotePage);

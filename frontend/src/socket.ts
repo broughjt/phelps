@@ -1,42 +1,47 @@
 import { Action, Initialize, Update } from "./reducer";
 
-type WebsocketMessage =
-  | {
-      tag: "building";
-    }
-  | {
-      tag: "initialize";
-      content: Initialize;
-    }
-  | {
-      tag: "update";
-      content: Update[];
-    }
-  | {
-      tag: "remove";
-      content: string[];
-    };
-
 export function handleSocketMessage(dispatch: (_: Action) => void) {
   return (event: MessageEvent) => {
-    // TODO: Handle the possibility that returned JSON is not a valid
-    // WebsocketMessage
-    const message: WebsocketMessage = JSON.parse(event.data);
-    console.log(message);
+    const message = JSON.parse(event.data);
 
     switch (message.tag) {
-      case "building":
+      case "building": {
         dispatch({ type: "building" });
         break;
-      case "initialize":
-        dispatch({ type: "initialize", payload: message.content });
+      }
+      case "initialize": {
+        if (message.content) {
+          const initialize: Initialize = {
+            outgoingLinks: message.content.outgoing_links,
+            titles: message.content.titles,
+            defaultNote: message.content.default_note,
+          };
+          dispatch({ type: "initialize", initialize: initialize });
+        } else {
+          throw new Error("Missing content in initialize message");
+        }
         break;
-      case "update":
-        dispatch({ type: "update", payload: message.content });
+      }
+      case "update": {
+        if (message.content) {
+          const updates: Update[] = message.content;
+          dispatch({ type: "update", updates: updates });
+        } else {
+          throw new Error("Missing content in update message");
+        }
         break;
-      case "remove":
-        dispatch({ type: "remove", payload: message.content });
+      }
+      case "remove": {
+        if (message.content) {
+          dispatch({ type: "remove", ids: message.content });
+        } else {
+          throw new Error("Missing content in remove message");
+        }
         break;
+      }
+      default: {
+        throw new Error(`Unknown message tag: ${message.tag}`);
+      }
     }
   };
 }

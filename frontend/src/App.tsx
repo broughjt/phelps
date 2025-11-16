@@ -1,13 +1,26 @@
-import { useEffect, useReducer } from "react";
+import { useCallback, useEffect, useReducer } from "react";
 import { initialState, reducer } from "./reducer";
 import { handleSocketMessage } from "./socket";
-import { Route, Switch } from "wouter";
+import { Redirect, Route, Switch } from "wouter";
+import { NotePage } from "./NotePage";
+import { NotesApi } from "./api";
+
+const HOST = "localhost:3000";
+const API_URL = `http://${HOST}`;
+const WEBSOCKET_URL = `ws://${HOST}/api/updates`;
+
+const noteApi = new NotesApi(API_URL);
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const fetchNoteContent = useCallback(async (id: string) => {
+    dispatch({ type: "fetchingContent", id });
+    const html = await noteApi.getNoteContent(id);
+    dispatch({ type: "setContent", id, html });
+  }, []);
 
   useEffect(() => {
-    const socket = new WebSocket("ws://localhost:3000/api/updates");
+    const socket = new WebSocket(WEBSOCKET_URL);
 
     socket.onclose = () => {
       console.log("WebSocket connection closed");
@@ -23,32 +36,45 @@ export default function App() {
     };
   }, []);
 
-  const notFound = <div>404, Not Found!</div>;
+  const notFound = <div>404, Not Found</div>;
 
   return (
     <Switch>
       <Route path="/note/:id">
         {({ id }) => {
-          // // TODO: Show a proper loading page not this nonsense
-          // // const title = state.titles.get(id) ?? "Loading...";
-          // // const links = state.graph.outgoing.get(id) ?? new Set();
-          // // const backlinks = state.graph.incoming.get(id) ?? new Set();
-          // return (
-          //   <NotePage
-          //     id={id}
-          //     title={title}
-          //     links={links}
-          //     backlinks={backlinks}
-          //   />
-          // );
           if (state.graph.hasNode(id)) {
-            <p>Hello, world</p>;
+            const title = state.titles[id];
+            const backlinkIds = Array.from(
+              state.graph.incomingEdges(id)!.values(),
+            );
+            const backlinks = Object.fromEntries(
+              backlinkIds.map((id: string) => [id, state.titles[id]]),
+            );
+            const html = state.content[id]?.html;
+            const status = state.content[id]?.status ?? "empty";
+
+            return (
+              <NotePage
+                id={id}
+                title={title}
+                backlinks={backlinks}
+                status={status}
+                html={html}
+                fetchNoteContent={fetchNoteContent}
+              />
+            );
           } else {
             return notFound;
           }
         }}
       </Route>
-      <Route>{notFound}</Route>
+      <Route>
+        {state.initialized ? (
+          <Redirect to={`/note/${state.defaultNote}`} />
+        ) : (
+          <p>TODO: Loading</p>
+        )}
+      </Route>
     </Switch>
   );
 }

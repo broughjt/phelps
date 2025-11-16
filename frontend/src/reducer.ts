@@ -1,7 +1,7 @@
 import { Graph } from "./graph";
 
 type Content = {
-  html: string;
+  html: string | null;
   status: "loaded" | "dirty" | "loading";
 };
 
@@ -11,6 +11,7 @@ type State = {
   titles: Record<string, string>;
   content: Record<string, Content>;
   initialized: boolean;
+  defaultNote: string | null;
 };
 
 export type Update = {
@@ -20,8 +21,9 @@ export type Update = {
 };
 
 export type Initialize = {
-  outgoing_links: Record<string, string[]>;
+  outgoingLinks: Record<string, string[]>;
   titles: Record<string, string>;
+  defaultNote: string;
 };
 
 export type Action =
@@ -30,30 +32,39 @@ export type Action =
     }
   | {
       type: "initialize";
-      payload: Initialize;
+      initialize: Initialize;
     }
   | {
       type: "update";
-      payload: Update[];
+      updates: Update[];
     }
   | {
       type: "remove";
-      payload: string[];
+      ids: string[];
+    }
+  | {
+      type: "fetchingContent";
+      id: string;
+    }
+  | {
+      type: "setContent";
+      id: string;
+      html: string;
     };
 
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "initialize": {
-      const { outgoing_links, titles } = action.payload;
+      const { outgoingLinks, titles, defaultNote } = action.initialize;
 
-      console.log("Initialize");
       // TODO: If we add new state, we'll want to potentially keep existing
       // state around here in stead of throwing it away
       return {
-        graph: Graph.fromOutgoing(outgoing_links),
+        graph: Graph.fromOutgoing(outgoingLinks),
         titles: titles,
         content: {},
         initialized: true,
+        defaultNote: defaultNote,
       };
     }
     case "building": {
@@ -61,7 +72,7 @@ export function reducer(state: State, action: Action): State {
       return state;
     }
     case "update": {
-      const updates = action.payload;
+      const updates = action.updates;
 
       const newTitles = { ...state.titles };
       const newContent = { ...state.content };
@@ -86,7 +97,7 @@ export function reducer(state: State, action: Action): State {
       };
     }
     case "remove": {
-      const ids = action.payload;
+      const ids = action.ids;
 
       const newTitles = { ...state.titles };
       const newContent = { ...state.content };
@@ -100,6 +111,33 @@ export function reducer(state: State, action: Action): State {
 
       return state;
     }
+    case "fetchingContent": {
+      const id = action.id;
+
+      const newContent = { ...state.content };
+      if (!newContent[id]) {
+        newContent[id] = { html: null, status: "loading" };
+      } else {
+        newContent[id].status = "loading";
+      }
+
+      return {
+        ...state,
+        content: newContent,
+      };
+    }
+    case "setContent": {
+      const id = action.id;
+      const html = action.html;
+
+      const newContent = { ...state.content };
+      newContent[id] = { status: "loaded", html: html };
+
+      return {
+        ...state,
+        content: newContent,
+      };
+    }
   }
 }
 
@@ -108,4 +146,5 @@ export const initialState: State = {
   titles: {},
   content: {},
   initialized: false,
+  defaultNote: null,
 };

@@ -2,7 +2,7 @@ use std::error::Error;
 
 use clap::Parser;
 use phelps::build_service::BuildService;
-use phelps::{router::router, notes_service::NotesServiceHandle};
+use phelps::{notes_service::NotesServiceHandle, router::router};
 use tokio::runtime::Runtime;
 use tokio::{net::TcpListener, signal};
 
@@ -38,7 +38,8 @@ fn watch(config: Config) -> Result<(), Box<dyn Error>> {
 
         let (notes_service_handle, notes_service) = NotesServiceHandle::build(
             cancel.clone(),
-            config.build_subdirectory.clone()
+            config.build_subdirectory.clone(),
+            config.default_note,
         );
         let build_server = BuildService::try_build(
             config.project_directory,
@@ -50,7 +51,7 @@ fn watch(config: Config) -> Result<(), Box<dyn Error>> {
             notes_service_handle.clone(),
             cancel.clone(),
         )?;
-        
+
         tracker.spawn(build_server.run());
         tracker.spawn(notes_service.run());
 
