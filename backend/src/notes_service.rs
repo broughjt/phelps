@@ -20,6 +20,7 @@ use crate::event::Event;
 struct NotesServiceState {
     cancel: CancellationToken,
     links: DiGraphMap<Uuid, ()>,
+    project_directory: PathBuf,
     build_subdirectory: PathBuf,
     default_note: Uuid,
     titles: HashMap<Uuid, String>,
@@ -213,6 +214,31 @@ impl NotesServiceState {
 
         (initialize, self.updates.subscribe())
     }
+
+    fn get_notes(&mut self) -> Vec<NoteItem> {
+        let mut items = self
+            .links
+            .nodes()
+            .map(|id| {
+                let title = self.titles.get(&id).unwrap().clone();
+                let file_id = self.file_ids.get(&id).unwrap();
+                let path = file_id.vpath().resolve(&self.project_directory).unwrap();
+
+                NoteItem { id, title, path }
+            })
+            .collect::<Vec<_>>();
+
+        items.sort_by(|u, v| u.title.cmp(&v.title));
+
+        items
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NoteItem {
+    pub id: Uuid,
+    pub title: String,
+    pub path: PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -251,6 +277,7 @@ enum NotesMessage {
     SetBuildFinished,
     GetBuildFinished(oneshot::Sender<Arc<Event>>),
     Subscribe(oneshot::Sender<(Initialize, broadcast::Receiver<NoteUpdate>)>),
+    GetNotes(oneshot::Sender<Vec<NoteItem>>),
 }
 
 pub struct NotesService {
@@ -284,6 +311,10 @@ impl NotesService {
             NotesMessage::Subscribe(sender) => {
                 let result = self.state.subscribe();
                 let _ = sender.send(result);
+            }
+            NotesMessage::GetNotes(sender) => {
+                let notes = self.state.get_notes();
+                let _ = sender.send(notes);
             }
         }
     }
@@ -419,9 +450,20 @@ impl NotesServiceHandle {
         receiver.await.map_err(|_| NotesServiceHandleError::Receive)
     }
 
+    pub async fn get_notes(&self) -> Result<Vec<NoteItem>, NotesServiceHandleError> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(NotesMessage::GetNotes(sender))
+            .await
+            .map_err(|_| NotesServiceHandleError::Send)?;
+
+        receiver.await.map_err(|_| NotesServiceHandleError::Receive)
+    }
+
     pub fn build(
         cancel: CancellationToken,
         build_subdirectory: PathBuf,
+        project_directory: PathBuf,
         default_note: Uuid,
     ) -> (NotesServiceHandle, NotesService) {
         pub const BUFFER_SIZE: usize = 64;
@@ -431,6 +473,7 @@ impl NotesServiceHandle {
         let state = NotesServiceState {
             cancel,
             build_subdirectory,
+            project_directory,
             default_note,
             links: DiGraphMap::default(),
             ids: HashMap::default(),

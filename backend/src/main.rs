@@ -2,12 +2,15 @@ use std::error::Error;
 
 use clap::Parser;
 use phelps::build_service::BuildService;
+use phelps::editor_protocol::{EditorServer, EditorServiceWrapper};
+use phelps::editor_service::EditorService;
 use phelps::{http_service::router, notes_service::NotesServiceHandle};
 use tokio::runtime::Runtime;
 use tokio::{net::TcpListener, signal};
 
 use phelps::config::{Arguments, Commands, Config};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tower::make::Shared;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::try_parse()?;
@@ -39,6 +42,7 @@ fn watch(config: Config) -> Result<(), Box<dyn Error>> {
         let (notes_service_handle, notes_service) = NotesServiceHandle::build(
             cancel.clone(),
             config.build_subdirectory.clone(),
+            config.project_directory.clone(),
             config.default_note,
         );
         let build_service = BuildService::try_build(
@@ -55,19 +59,21 @@ fn watch(config: Config) -> Result<(), Box<dyn Error>> {
         tracker.spawn(build_service.run());
         tracker.spawn(notes_service.run());
 
+        let listener = TcpListener::bind("127.0.0.1:3001").await?;
+        let editor_service = Shared::new(EditorServiceWrapper(EditorService::new(
+            notes_service_handle.clone(),
+        )));
+        let editor = EditorServer::new(listener, editor_service, cancel.clone());
+
+        tracker.spawn(editor.run());
+
         let router = router(notes_service_handle);
         let listener = TcpListener::bind("127.0.0.1:3000").await?;
         let http = axum::serve(listener, router)
-            .with_graceful_shutdown(cancel.cancelled())
+            .with_graceful_shutdown(cancel.cancelled_owned())
             .into_future();
 
         tracker.spawn(http);
-
-        let listener = TcpListener::bind("127.0.0.1:3001").await?;
-        let editor_service = todo!();
-        let editor = EditorListener::new(listener, editor_service, cancel.cancelled_owned());
-
-        tracker.spawn(editor);
 
         tracker.close();
         tracker.wait().await;
