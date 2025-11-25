@@ -4,6 +4,7 @@
     "": {
       "name": "frontend",
       "dependencies": {
+        "@fontsource/fira-sans": "^5.2.7",
         "@fontsource/inter": "^5.2.7",
         "@fontsource/libertinus-serif": "^5.2.1",
         "@fontsource/libertinus-serif-display": "^5.2.1",
@@ -135,6 +136,8 @@
     "@eslint/object-schema": ["@eslint/object-schema@2.1.6", "", {}, "sha512-RBMg5FRL0I0gs51M/guSAj5/e14VQ4tpZnQNWwuDT66P14I43ItmPfIZRhO9fUVIPOAQXU47atlywZ/czoqFPA=="],
 
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.3.5", "", { "dependencies": { "@eslint/core": "^0.15.2", "levn": "^0.4.1" } }, "sha512-Z5kJ+wU3oA7MMIqVR9tyZRtjYPr4OC004Q4Rw7pgOKUOKkJfZ3O24nz3WYfGRpMDNmcOi3TwQOmgm7B7Tpii0w=="],
+
+    "@fontsource/fira-sans": ["@fontsource/fira-sans@5.2.7", "", {}, "sha512-5DE4AealD/VnbwdzMgnpWfCttMQBbteNiK9DCJE7cVwZEbDTPLUoFDMMvxNQ498nZc5in7Mta9c/s+3Ehh0BAg=="],
 
     "@fontsource/inter": ["@fontsource/inter@5.2.7", "", {}, "sha512-sfE4VQglV9B05DuJ+RD2RHY42FiVTdCf/dJtVkugRVkygoDigLM4SuNcBrCeo+zoGiC/IudmVcE6QKqW7S1Gkg=="],
 

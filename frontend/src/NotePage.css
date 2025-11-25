@@ -15,25 +15,6 @@
 /* } */
 
 /* Thalia version */
-.layout {
-    display: flex;
-    justify-content: center;
-}
-
-article {
-    max-width: 800px;
-    flex-grow: 1;
-}
-
-aside {
-    flex-shrink: 1;
-    width: 256px;
-    min-width: 192px;
-}
-
-.right-column {
-    flex-shrink: 4;
-}
 
 /* article { */
 /*     /\* margin: auto; *\/ */
@@ -72,7 +53,6 @@ aside {
 /* main > p { */
 /*     font-size: 20px; */
 /* } */
-
 
 /* aside { */
 /*     width: 250px; */

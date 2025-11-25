@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/fira-sans": "^5.2.7",
     "@fontsource/inter": "^5.2.7",
     "@fontsource/libertinus-serif": "^5.2.1",
     "@fontsource/libertinus-serif-display": "^5.2.1",
