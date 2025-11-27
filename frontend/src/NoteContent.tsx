@@ -5,6 +5,8 @@ type NoteContentProperties = {
   id: string;
   status: "empty" | "loaded" | "dirty" | "loading";
   html: string | null;
+  warnings: string[];
+  errors: string[];
   fetchNoteContent: (id: string) => Promise<void>;
 };
 
@@ -12,6 +14,8 @@ export function NoteContent({
   id,
   status,
   html,
+  warnings,
+  errors,
   fetchNoteContent,
 }: NoteContentProperties): JSX.Element {
   const [, navigate] = useLocation();
@@ -46,15 +50,45 @@ export function NoteContent({
     }
   }, [id, status, fetchNoteContent]);
 
-  return (
-    <div ref={containerReference}>
-      {html ? (
+  // return (
+  //   <div ref={containerReference}>
+  //     {html ? (
+  //       <div dangerouslySetInnerHTML={{ __html: html }} />
+  //     ) : (
+  //       <div>
+  //         <p>TODO: Loading</p>
+  //       </div>
+  //     )}
+  //   </div>
+  // );
+  if (errors.length > 0) {
+    return (
+      <div ref={containerReference}>
+        <h3>Errors</h3>
+        <ul>
+          {errors.map((error, index) => (
+            <li key={index}>{error}</li>
+          ))}
+        </ul>
+        <h3>Warnings</h3>
+        <ul>
+          {warnings.map((warning, index) => (
+            <li key={index}>{warning}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  } else if (html) {
+    return (
+      <div ref={containerReference}>
         <div dangerouslySetInnerHTML={{ __html: html }} />
-      ) : (
-        <div>
-          <p>TODO: Loading</p>
-        </div>
-      )}
-    </div>
-  );
+      </div>
+    );
+  } else {
+    return (
+      <div ref={containerReference}>
+        <p>TODO: Loading</p>
+      </div>
+    );
+  }
 }

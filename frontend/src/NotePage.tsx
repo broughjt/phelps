@@ -7,15 +7,18 @@ type NotePageProperties = {
   backlinks: Record<string, string>;
   status: "loaded" | "dirty" | "loading";
   html: string | null;
+  warnings: string[];
+  errors: string[];
   fetchNoteContent: (id: string) => Promise<void>;
 };
 
 export function NotePage({
   id,
   title,
-  backlinks,
   status,
   html,
+  warnings,
+  errors,
   fetchNoteContent,
 }: NotePageProperties): JSX.Element {
   // return (
@@ -46,7 +49,14 @@ export function NotePage({
   return (
     <main>
       <h1>{title}</h1>
-      <NoteContent id={id} status={status} html={html} fetchNoteContent={fetchNoteContent} />
+      <NoteContent
+        id={id}
+        status={status}
+        html={html}
+        warnings={warnings}
+        errors={errors}
+        fetchNoteContent={fetchNoteContent}
+      />
     </main>
-  )
+  );
 }

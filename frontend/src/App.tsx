@@ -57,6 +57,8 @@ export default function App() {
             );
             const html = state.content[id]?.html;
             const status = state.content[id]?.status ?? "empty";
+            const warnings = state.content[id]?.warnings ?? [];
+            const errors = state.content[id]?.errors ?? [];
 
             return (
               <NotePage
@@ -65,6 +67,8 @@ export default function App() {
                 backlinks={backlinks}
                 status={status}
                 html={html}
+                warnings={warnings}
+                errors={errors}
                 fetchNoteContent={fetchNoteContent}
               />
             );

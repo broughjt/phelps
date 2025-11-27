@@ -8,11 +8,7 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
-use typst::{
-    diag::{SourceDiagnostic, Warned},
-    ecow::EcoVec,
-    syntax::FileId,
-};
+use typst::syntax::FileId;
 use uuid::Uuid;
 
 use crate::event::Event;
@@ -26,9 +22,9 @@ struct NotesServiceState {
     titles: HashMap<Uuid, String>,
     file_ids: HashMap<Uuid, FileId>,
     ids: HashMap<FileId, Vec<Uuid>>,
-    errors: HashMap<FileId, Result<Warned<()>, EcoVec<SourceDiagnostic>>>,
+    errors: HashMap<FileId, Result<Vec<String>, Vec<String>>>,
     build_finished_event: Arc<Event>,
-    updates: broadcast::Sender<NoteUpdate>,
+    updates: broadcast::Sender<NoteMessage>,
 }
 
 impl NotesServiceState {
@@ -44,6 +40,7 @@ impl NotesServiceState {
         }
     }
 
+    /*
     fn create_note(
         &mut self,
         file_id: FileId,
@@ -67,17 +64,11 @@ impl NotesServiceState {
     fn create_notes(
         &mut self,
         file_id: FileId,
-        result: Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
+        result: Result<(Vec<String>, Vec<NoteData>), Vec<String>>,
     ) {
         match result {
-            Ok(Warned { output, warnings }) => {
-                self.errors.insert(
-                    file_id,
-                    Ok(Warned {
-                        output: (),
-                        warnings,
-                    }),
-                );
+            Ok((warnings, output)) => {
+                self.errors.insert(file_id, Ok(warnings));
                 self.ids.insert(file_id, Vec::with_capacity(output.len()));
 
                 for data in output.iter().cloned() {
@@ -88,11 +79,16 @@ impl NotesServiceState {
                     let _ = self.updates.send(NoteUpdate::Update(output));
                 }
             }
-            Err(error) => {
-                self.errors.insert(file_id, Err(error));
+            Err(errors) => {
+                self.errors.insert(file_id, Err(errors));
+
+                if let Some(ids) = self.ids.get(&file_id) {}
+
+                todo!()
             }
         }
     }
+    */
 
     fn update_note(
         &mut self,
@@ -103,6 +99,8 @@ impl NotesServiceState {
             links,
         }: NoteData,
     ) {
+        self.links.add_node(i);
+
         let js: Vec<Uuid> = self.links.neighbors(i).collect();
 
         for j in js {
@@ -113,45 +111,60 @@ impl NotesServiceState {
         }
 
         self.ids.get_mut(&file_id).unwrap().push(i);
-        self.titles.insert(i, title);
         self.file_ids.insert(i, file_id);
+        self.titles.insert(i, title);
     }
 
     fn update_notes(
         &mut self,
-        updates: Vec<(
-            FileId,
-            Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
-        )>,
+        updates: Vec<(FileId, Result<(Vec<String>, Vec<NoteData>), Vec<String>>)>,
     ) {
-        let mut data: Vec<NoteData> = Vec::new();
+        let mut data: Vec<NoteUpdate> = Vec::new();
 
         for (file_id, result) in updates {
             match result {
-                Ok(Warned { output, warnings }) => {
-                    self.errors.insert(
-                        file_id,
-                        Ok(Warned {
-                            output: (),
-                            warnings,
-                        }),
+                Ok((warnings, outputs)) => {
+                    data.extend(
+                        outputs
+                            .iter()
+                            .cloned()
+                            .map(|NoteData { id, title, links }| NoteUpdate {
+                                id,
+                                title,
+                                links,
+                                warnings: warnings.clone(),
+                                errors: Vec::new(),
+                            }),
                     );
-                    self.ids.get_mut(&file_id).unwrap().clear();
 
-                    data.extend(output.iter().cloned());
+                    self.errors.insert(file_id, Ok(warnings));
+                    self.ids.entry(file_id).or_default().clear();
 
-                    for data in output {
+                    for data in outputs {
                         self.update_note(file_id, data);
                     }
                 }
-                Err(error) => {
-                    self.errors.insert(file_id, Err(error));
+                Err(errors) => {
+                    if let Some(ids) = self.ids.get(&file_id) {
+                        for &id in ids {
+                            let update = NoteUpdate {
+                                id,
+                                title: self.titles.get(&id).unwrap().clone(),
+                                links: Vec::new(),
+                                warnings: Vec::new(),
+                                errors: errors.clone(),
+                            };
+                            data.push(update);
+                        }
+                    }
+
+                    self.errors.insert(file_id, Err(errors));
                 }
             }
         }
 
         if self.build_finished_event.has_occured() && !data.is_empty() {
-            let _ = self.updates.send(NoteUpdate::Update(data));
+            let _ = self.updates.send(NoteMessage::Update(data));
         }
     }
 
@@ -185,7 +198,7 @@ impl NotesServiceState {
                 self.cancel.cancel();
             }
 
-            let _ = self.updates.send(NoteUpdate::Remove(is));
+            let _ = self.updates.send(NoteMessage::Remove(is));
         }
     }
 
@@ -197,7 +210,7 @@ impl NotesServiceState {
         self.build_finished_event.clone()
     }
 
-    fn subscribe(&mut self) -> (Initialize, broadcast::Receiver<NoteUpdate>) {
+    fn subscribe(&mut self) -> (Initialize, broadcast::Receiver<NoteMessage>) {
         let mut outgoing_links: HashMap<Uuid, Vec<Uuid>> =
             HashMap::with_capacity(self.links.node_count());
 
@@ -234,7 +247,7 @@ impl NotesServiceState {
     }
 
     fn focus_note(&mut self, id: Uuid) {
-        let _ = self.updates.send(NoteUpdate::Focus(id));
+        let _ = self.updates.send(NoteMessage::Focus(id));
     }
 }
 
@@ -252,6 +265,15 @@ pub struct NoteData {
     pub links: Vec<Uuid>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NoteUpdate {
+    pub title: String,
+    pub id: Uuid,
+    pub links: Vec<Uuid>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Initialize {
     pub outgoing_links: HashMap<Uuid, Vec<Uuid>>,
@@ -260,28 +282,21 @@ pub struct Initialize {
 }
 
 #[derive(Clone)]
-pub enum NoteUpdate {
-    Update(Vec<NoteData>),
+pub enum NoteMessage {
+    Update(Vec<NoteUpdate>),
     Remove(Vec<Uuid>),
     Focus(Uuid),
 }
 
 enum NotesMessage {
     GetNoteContent(Uuid, oneshot::Sender<Result<Option<String>, io::Error>>),
-    CreateNotes(
-        FileId,
-        Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
-    ),
-    UpdateNotes(
-        Vec<(
-            FileId,
-            Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
-        )>,
-    ),
+    // TODO
+    // CreateNotes(FileId, Result<(Vec<String>, Vec<NoteData>), Vec<String>>),
+    UpdateNotes(Vec<(FileId, Result<(Vec<String>, Vec<NoteData>), Vec<String>>)>),
     RemoveNotes(FileId),
     SetBuildFinished,
     GetBuildFinished(oneshot::Sender<Arc<Event>>),
-    Subscribe(oneshot::Sender<(Initialize, broadcast::Receiver<NoteUpdate>)>),
+    Subscribe(oneshot::Sender<(Initialize, broadcast::Receiver<NoteMessage>)>),
     GetNotes(oneshot::Sender<Vec<NoteItem>>),
     Focus(Uuid),
 }
@@ -298,9 +313,10 @@ impl NotesService {
                 let response = self.state.get_note_content(uuid).await;
                 let _ = sender.send(response);
             }
-            NotesMessage::CreateNotes(file_id, result) => {
-                self.state.create_notes(file_id, result);
-            }
+            // TODO:
+            // NotesMessage::CreateNotes(file_id, result) => {
+            //     self.state.create_notes(file_id, result);
+            // }
             NotesMessage::UpdateNotes(updates) => {
                 self.state.update_notes(updates);
             }
@@ -388,26 +404,23 @@ impl NotesServiceHandle {
         Ok(result)
     }
 
-    pub async fn create_notes(
-        &self,
-        file_id: FileId,
-        result: Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
-    ) -> Result<(), NotesServiceHandleError> {
-        let message = NotesMessage::CreateNotes(file_id, result);
-        self.sender
-            .send(message)
-            .await
-            .map_err(|_| NotesServiceHandleError::Send)?;
+    // pub async fn create_notes(
+    //     &self,
+    //     file_id: FileId,
+    //     result: Result<(Vec<String>, Vec<NoteData>), Vec<String>>,
+    // ) -> Result<(), NotesServiceHandleError> {
+    //     let message = NotesMessage::CreateNotes(file_id, result);
+    //     self.sender
+    //         .send(message)
+    //         .await
+    //         .map_err(|_| NotesServiceHandleError::Send)?;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     pub async fn update_notes(
         &self,
-        updates: Vec<(
-            FileId,
-            Result<Warned<Vec<NoteData>>, EcoVec<SourceDiagnostic>>,
-        )>,
+        updates: Vec<(FileId, Result<(Vec<String>, Vec<NoteData>), Vec<String>>)>,
     ) -> Result<(), NotesServiceHandleError> {
         let message = NotesMessage::UpdateNotes(updates);
         self.sender
@@ -449,7 +462,7 @@ impl NotesServiceHandle {
 
     pub async fn subscribe(
         &self,
-    ) -> Result<(Initialize, broadcast::Receiver<NoteUpdate>), NotesServiceHandleError> {
+    ) -> Result<(Initialize, broadcast::Receiver<NoteMessage>), NotesServiceHandleError> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(NotesMessage::Subscribe(sender))

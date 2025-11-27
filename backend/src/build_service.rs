@@ -243,16 +243,22 @@ impl BuildService {
         )
         .await
         {
-            Ok(Ok((warned, dependencies))) => {
+            Ok(Ok((warnings, outputs, dependencies))) => {
                 self.graph.add_node(i);
                 for j in dependencies {
                     self.graph.add_edge(i, j, ());
                 }
 
-                let _ = self.notes_service.create_notes(i, Ok(warned)).await;
+                let _ = self
+                    .notes_service
+                    .update_notes(vec![(i, Ok((warnings, outputs)))])
+                    .await;
             }
             Ok(Err(errors)) => {
-                let _ = self.notes_service.create_notes(i, Err(errors)).await;
+                let _ = self
+                    .notes_service
+                    .update_notes(vec![(i, Err(errors))])
+                    .await;
             }
             Err(error) => {
                 // Here we failed to write on of the fragments to the build
@@ -299,7 +305,7 @@ impl BuildService {
             .await;
 
             match result {
-                Ok(Ok((warned, dependencies))) => {
+                Ok(Ok((warnings, outputs, dependencies))) => {
                     let ks: Vec<FileId> = self
                         .graph
                         .neighbors_directed(j, Direction::Incoming)
@@ -314,7 +320,7 @@ impl BuildService {
                         }
                     }
 
-                    results.push((j, Ok(warned)));
+                    results.push((j, Ok((warnings, outputs))));
                 }
                 Ok(Err(error)) => results.push((j, Err(error))),
                 Err(error) => {
@@ -342,12 +348,19 @@ impl BuildService {
 
 type CompileOutput = (Html, HtmlDocument, HashSet<FileId>);
 
+fn into_messages(errors: EcoVec<SourceDiagnostic>) -> Vec<String> {
+    errors
+        .into_iter()
+        .map(|SourceDiagnostic { message, .. }| message.to_string())
+        .collect::<Vec<_>>()
+}
+
 fn compile<S>(
     resources: Arc<Resources>,
     package_storage: PackageStorage<S>,
     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
     main_id: FileId,
-) -> Result<Warned<CompileOutput>, EcoVec<SourceDiagnostic>>
+) -> Result<(Vec<String>, CompileOutput), Vec<String>>
 where
     S: Send + Sync,
     S: PackageService,
@@ -361,15 +374,14 @@ where
         output: result,
         warnings,
     } = typst::compile::<HtmlDocument>(&world);
-    let document = result?;
+    let document = result.map_err(into_messages)?;
 
-    let output = typst_html::html(&document)?;
+    let output = typst_html::html(&document).map_err(into_messages)?;
     let html = Html::parse_document(&output);
 
-    Ok(Warned {
-        output: (html, document, world.into_dependencies()),
-        warnings,
-    })
+    let warnings = into_messages(warnings);
+
+    Ok((warnings, (html, document, world.into_dependencies())))
 }
 
 pub struct NoteUuid(pub Uuid);
@@ -506,7 +518,7 @@ fn find_links(html: &Html) -> Vec<Uuid> {
         .collect()
 }
 
-type BuildOutputs = (Warned<Vec<NoteData>>, HashSet<FileId>);
+type BuildOutputs = (Vec<String>, Vec<NoteData>, HashSet<FileId>);
 
 async fn build<S>(
     resources: Arc<Resources>,
@@ -514,7 +526,7 @@ async fn build<S>(
     slots: Arc<Mutex<HashMap<FileId, FileSlot>>>,
     build_subdirectory: Arc<PathBuf>,
     main_id: FileId,
-) -> Result<Result<BuildOutputs, EcoVec<SourceDiagnostic>>, io::Error>
+) -> Result<Result<BuildOutputs, Vec<String>>, io::Error>
 where
     S: Send + Sync + 'static,
     S: PackageService,
@@ -523,10 +535,8 @@ where
     S::GetPackageBuffer: Buf,
 {
     let result = tokio::task::spawn_blocking(move || {
-        let Warned {
-            output: (html, document, dependencies),
-            warnings,
-        } = compile(resources, package_storage, slots, main_id)?;
+        let (warnings, (html, document, dependencies)) =
+            compile(resources, package_storage, slots, main_id)?;
         let fragments = extract_note_fragments(&html, &document);
         let (outputs, writes) = fragments
             .into_iter()
@@ -542,26 +552,14 @@ where
             })
             .unzip::<_, _, Vec<_>, Vec<_>>();
 
-        Ok((
-            Warned {
-                output: (outputs, writes),
-                warnings,
-            },
-            dependencies,
-        ))
+        Ok((warnings, outputs, writes, dependencies))
     })
     .await
     // If code in this task panics, we should panic
     .unwrap();
 
     match result {
-        Ok((
-            Warned {
-                output: (outputs, writes),
-                warnings,
-            },
-            dependencies,
-        )) => {
+        Ok((warnings, outputs, writes, dependencies)) => {
             futures::future::join_all(writes)
                 .await
                 .into_iter()
@@ -569,13 +567,7 @@ where
                 // just want to check if all writes succeeded.
                 .try_for_each(|result| result)?;
 
-            Ok(Ok((
-                Warned {
-                    output: outputs,
-                    warnings,
-                },
-                dependencies,
-            )))
+            Ok(Ok((warnings, outputs, dependencies)))
         }
         Err(errors) => Ok(Err(errors)),
     }

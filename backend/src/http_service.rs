@@ -18,7 +18,7 @@ use tower_http::cors;
 use uuid::Uuid;
 
 use crate::notes_service::{
-    Initialize, NoteData, NoteUpdate, NotesServiceHandle, NotesServiceHandleError,
+    Initialize, NoteMessage, NoteUpdate, NotesServiceHandle, NotesServiceHandleError,
 };
 
 struct GetNoteContentResponse {
@@ -60,7 +60,7 @@ pub enum WebsocketMessage {
     #[serde(rename(serialize = "initialize"))]
     Initialize(Initialize),
     #[serde(rename(serialize = "update"))]
-    Update(Vec<NoteData>),
+    Update(Vec<NoteUpdate>),
     #[serde(rename(serialize = "remove"))]
     Remove(Vec<Uuid>),
     #[serde(rename(serialize = "focus"))]
@@ -107,9 +107,9 @@ async fn handle_updates_helper(
         match receiver.recv().await {
             Ok(update) => {
                 let payload = match update {
-                    NoteUpdate::Update(updates) => WebsocketMessage::Update(updates),
-                    NoteUpdate::Remove(removes) => WebsocketMessage::Remove(removes),
-                    NoteUpdate::Focus(id) => WebsocketMessage::Focus(id),
+                    NoteMessage::Update(updates) => WebsocketMessage::Update(updates),
+                    NoteMessage::Remove(removes) => WebsocketMessage::Remove(removes),
+                    NoteMessage::Focus(id) => WebsocketMessage::Focus(id),
                 };
                 let content = serde_json::to_string(&payload).unwrap();
 

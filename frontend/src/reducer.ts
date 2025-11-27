@@ -3,11 +3,12 @@ import { Graph } from "./graph";
 type Content = {
   html: string | null;
   status: "loaded" | "dirty" | "loading";
+  warnings: string[];
+  errors: string[];
 };
 
 type State = {
   graph: Graph;
-  // TODO: Change to more stuff if/when needed
   titles: Record<string, string>;
   content: Record<string, Content>;
   initialized: boolean;
@@ -18,6 +19,8 @@ export type Update = {
   id: string;
   title: string;
   links: string[];
+  warnings: string[];
+  errors: string[];
 };
 
 export type Initialize = {
@@ -72,16 +75,18 @@ export function reducer(state: State, action: Action): State {
       return state;
     }
     case "update": {
-      const updates = action.updates;
+      const updates: Update[] = action.updates;
 
       const newTitles = { ...state.titles };
       const newContent = { ...state.content };
       const newGraph = state.graph.shallowCopy();
 
-      for (const { id, title, links } of updates) {
+      for (const { id, title, links, warnings, errors } of updates) {
         newTitles[id] = title;
         if (newContent[id]) {
           newContent[id].status = "dirty";
+          newContent[id].warnings = warnings;
+          newContent[id].errors = errors;
         }
 
         for (const j in links) {
@@ -116,7 +121,12 @@ export function reducer(state: State, action: Action): State {
 
       const newContent = { ...state.content };
       if (!newContent[id]) {
-        newContent[id] = { html: null, status: "loading" };
+        newContent[id] = {
+          html: null,
+          status: "loading",
+          warnings: [],
+          errors: [],
+        };
       } else {
         newContent[id].status = "loading";
       }
@@ -131,7 +141,17 @@ export function reducer(state: State, action: Action): State {
       const html = action.html;
 
       const newContent = { ...state.content };
-      newContent[id] = { status: "loaded", html: html };
+      if (!newContent[id]) {
+        newContent[id] = {
+          html,
+          status: "loaded",
+          warnings: [],
+          errors: [],
+        };
+      } else {
+        newContent[id].html = html;
+        newContent[id].status = "loaded";
+      }
 
       return {
         ...state,
