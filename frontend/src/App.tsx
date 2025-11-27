@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer } from "react";
 import { initialState, reducer } from "./reducer";
 import { handleSocketMessage } from "./socket";
-import { Redirect, Route, Switch } from "wouter";
+import { Redirect, Route, Switch, useLocation } from "wouter";
 import { NotePage } from "./NotePage";
 import { NotesApi } from "./api";
 
@@ -12,12 +12,17 @@ const WEBSOCKET_URL = `ws://${HOST}/api/updates`;
 const noteApi = new NotesApi(API_URL);
 
 export default function App() {
+  const [, navigate] = useLocation();
   const [state, dispatch] = useReducer(reducer, initialState);
   const fetchNoteContent = useCallback(async (id: string) => {
     dispatch({ type: "fetchingContent", id });
     const html = await noteApi.getNoteContent(id);
     dispatch({ type: "setContent", id, html });
   }, []);
+  const navigateToNote = useCallback(
+    (id: string) => navigate(`/note/${id}`),
+    [navigate],
+  );
 
   useEffect(() => {
     const socket = new WebSocket(WEBSOCKET_URL);
@@ -29,12 +34,12 @@ export default function App() {
       console.error("WebSocket error:", error);
     };
 
-    socket.onmessage = handleSocketMessage(dispatch);
+    socket.onmessage = handleSocketMessage(dispatch, navigateToNote);
 
     return () => {
       socket.close();
     };
-  }, []);
+  }, [dispatch, navigateToNote]);
 
   const notFound = <div>404, Not Found</div>;
 

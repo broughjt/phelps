@@ -63,6 +63,8 @@ pub enum WebsocketMessage {
     Update(Vec<NoteData>),
     #[serde(rename(serialize = "remove"))]
     Remove(Vec<Uuid>),
+    #[serde(rename(serialize = "focus"))]
+    Focus(Uuid),
 }
 
 async fn handle_updates_helper(
@@ -107,6 +109,7 @@ async fn handle_updates_helper(
                 let payload = match update {
                     NoteUpdate::Update(updates) => WebsocketMessage::Update(updates),
                     NoteUpdate::Remove(removes) => WebsocketMessage::Remove(removes),
+                    NoteUpdate::Focus(id) => WebsocketMessage::Focus(id),
                 };
                 let content = serde_json::to_string(&payload).unwrap();
 

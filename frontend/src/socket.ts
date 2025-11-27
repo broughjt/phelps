@@ -1,6 +1,9 @@
 import { Action, Initialize, Update } from "./reducer";
 
-export function handleSocketMessage(dispatch: (_: Action) => void) {
+export function handleSocketMessage(
+  dispatch: (_: Action) => void,
+  navigateToNote: (_: string) => void
+) {
   return (event: MessageEvent) => {
     const message = JSON.parse(event.data);
 
@@ -36,6 +39,14 @@ export function handleSocketMessage(dispatch: (_: Action) => void) {
           dispatch({ type: "remove", ids: message.content });
         } else {
           throw new Error("Missing content in remove message");
+        }
+        break;
+      }
+      case "focus": {
+        if (message.content) {
+          navigateToNote(message.content);
+        } else {
+          throw new Error("Missing content in focus message");
         }
         break;
       }

@@ -232,6 +232,10 @@ impl NotesServiceState {
 
         items
     }
+
+    fn focus_note(&mut self, id: Uuid) {
+        let _ = self.updates.send(NoteUpdate::Focus(id));
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -259,6 +263,7 @@ pub struct Initialize {
 pub enum NoteUpdate {
     Update(Vec<NoteData>),
     Remove(Vec<Uuid>),
+    Focus(Uuid),
 }
 
 enum NotesMessage {
@@ -278,6 +283,7 @@ enum NotesMessage {
     GetBuildFinished(oneshot::Sender<Arc<Event>>),
     Subscribe(oneshot::Sender<(Initialize, broadcast::Receiver<NoteUpdate>)>),
     GetNotes(oneshot::Sender<Vec<NoteItem>>),
+    Focus(Uuid),
 }
 
 pub struct NotesService {
@@ -315,6 +321,9 @@ impl NotesService {
             NotesMessage::GetNotes(sender) => {
                 let notes = self.state.get_notes();
                 let _ = sender.send(notes);
+            }
+            NotesMessage::Focus(id) => {
+                self.state.focus_note(id);
             }
         }
     }
@@ -458,6 +467,13 @@ impl NotesServiceHandle {
             .map_err(|_| NotesServiceHandleError::Send)?;
 
         receiver.await.map_err(|_| NotesServiceHandleError::Receive)
+    }
+
+    pub async fn focus_note(&self, id: Uuid) -> Result<(), NotesServiceHandleError> {
+        self.sender
+            .send(NotesMessage::Focus(id))
+            .await
+            .map_err(|_| NotesServiceHandleError::Send)
     }
 
     pub fn build(

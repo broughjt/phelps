@@ -1,6 +1,7 @@
 use std::{
     convert::Infallible,
     error::Error,
+    future::Future,
     io,
     net::SocketAddr,
     pin::Pin,
@@ -14,6 +15,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tower::{MakeService, Service};
+use uuid::Uuid;
 
 use crate::notes_service::NoteItem;
 
@@ -44,15 +46,27 @@ pub struct GetNotesResponse {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "tag")]
-pub enum Message<G> {
-    #[serde(rename(serialize = "get_notes", deserialize = "get_notes"))]
-    GetNotes(G),
+pub struct FocusNoteRequest {
+    pub id: Uuid,
 }
 
-pub type Request = Message<GetNotesRequest>;
+#[derive(Serialize, Deserialize)]
+pub struct FocusNoteResponse {
+    pub result: Result<(), String>,
+}
 
-pub type Response = Message<GetNotesResponse>;
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "tag")]
+pub enum Message<GetNotes, FocusNote> {
+    #[serde(rename(serialize = "get_notes", deserialize = "get_notes"))]
+    GetNotes(GetNotes),
+    #[serde(rename(serialize = "focus_note", deserialize = "focus_note"))]
+    FocusNote(FocusNote),
+}
+
+pub type Request = Message<GetNotesRequest, FocusNoteRequest>;
+
+pub type Response = Message<GetNotesResponse, FocusNoteResponse>;
 
 impl<M> EditorServer<M>
 where
@@ -135,6 +149,11 @@ pub trait Editor {
     type GetNotesFuture: Future<Output = Result<Vec<NoteItem>, Self::GetNotesError>>;
 
     fn get_notes(&mut self) -> Self::GetNotesFuture;
+
+    type FocusNoteError: Error;
+    type FocusNoteFuture: Future<Output = Result<(), Self::FocusNoteError>>;
+
+    fn focus_note(&mut self, id: Uuid) -> Self::FocusNoteFuture;
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +162,8 @@ pub struct EditorServiceWrapper<T>(pub T);
 impl<T: Editor> Service<Request> for EditorServiceWrapper<T> {
     type Response = Response;
     type Error = Infallible;
-    type Future = EditorServiceResponseFuture<T::GetNotesFuture>;
+    type Future =
+        EditorServiceResponseFuture<T::GetNotesFuture, T::FocusNoteFuture>;
 
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -151,8 +171,11 @@ impl<T: Editor> Service<Request> for EditorServiceWrapper<T> {
 
     fn call(&mut self, request: Request) -> Self::Future {
         match request {
-            Message::GetNotes(GetNotesRequest) => {
-                EditorServiceResponseFuture::GetNotes(self.0.get_notes())
+            Message::GetNotes(GetNotesRequest) => EditorServiceResponseFuture::GetNotes(
+                self.0.get_notes(),
+            ),
+            Message::FocusNote(FocusNoteRequest { id }) => {
+                EditorServiceResponseFuture::FocusNote(self.0.focus_note(id))
             }
         }
     }
@@ -160,14 +183,18 @@ impl<T: Editor> Service<Request> for EditorServiceWrapper<T> {
 
 #[pin_project::pin_project(project = EditorServiceResponseFutureProjection)]
 #[derive(Debug)]
-pub enum EditorServiceResponseFuture<GetNotesFuture> {
+pub enum EditorServiceResponseFuture<GetNotesFuture, FocusNoteFuture> {
     GetNotes(#[pin] GetNotesFuture),
+    FocusNote(#[pin] FocusNoteFuture),
 }
 
-impl<GetNotesFuture, GetNotesError> Future for EditorServiceResponseFuture<GetNotesFuture>
+impl<GetNotesFuture, FocusNoteFuture, GetNotesError, FocusNoteError> Future
+    for EditorServiceResponseFuture<GetNotesFuture, FocusNoteFuture>
 where
     GetNotesFuture: Future<Output = Result<Vec<NoteItem>, GetNotesError>>,
     GetNotesError: Error,
+    FocusNoteFuture: Future<Output = Result<(), FocusNoteError>>,
+    FocusNoteError: Error,
 {
     type Output = Result<Response, Infallible>;
 
@@ -178,6 +205,11 @@ where
             GetNotes(future) => future.poll(context).map(|result| {
                 Ok(Response::GetNotes(GetNotesResponse {
                     items: result.map_err(|error| format!("{:?}", error)),
+                }))
+            }),
+            FocusNote(future) => future.poll(context).map(|result| {
+                Ok(Response::FocusNote(FocusNoteResponse {
+                    result: result.map_err(|error| format!("{:?}", error)),
                 }))
             }),
         }
