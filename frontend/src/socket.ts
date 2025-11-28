@@ -2,7 +2,7 @@ import { Action, Initialize, Update } from "./reducer";
 
 export function handleSocketMessage(
   dispatch: (_: Action) => void,
-  navigateToNote: (_: string) => void
+  navigateToNote: (_: string) => void,
 ) {
   return (event: MessageEvent) => {
     const message = JSON.parse(event.data);
@@ -44,6 +44,7 @@ export function handleSocketMessage(
       }
       case "focus": {
         if (message.content) {
+          console.log(`Navigating to note: ${message.content}`);
           navigateToNote(message.content);
         } else {
           throw new Error("Missing content in focus message");

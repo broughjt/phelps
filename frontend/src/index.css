@@ -1,3 +1,7 @@
-body {
-  font-family: 'Libertinus Serif Display', system-ui;
-}
+@import "./styles/mathyml.css";
+@import "./styles/new_computer_modern.css";
+
+/* TODO: */
+/*body {
+    font-family: "Libertinus Serif Display", system-ui;
+}*/

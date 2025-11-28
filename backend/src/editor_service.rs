@@ -29,8 +29,7 @@ impl Editor for EditorService {
     }
 
     type FocusNoteError = NotesServiceHandleError;
-    type FocusNoteFuture =
-        Pin<Box<dyn Future<Output = Result<(), Self::FocusNoteError>> + Send>>;
+    type FocusNoteFuture = Pin<Box<dyn Future<Output = Result<(), Self::FocusNoteError>> + Send>>;
 
     fn focus_note(&mut self, id: uuid::Uuid) -> Self::FocusNoteFuture {
         let notes_service = self.notes_service.clone();
