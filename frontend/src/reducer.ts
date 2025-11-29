@@ -89,7 +89,7 @@ export function reducer(state: State, action: Action): State {
           newContent[id].errors = errors;
         }
 
-        for (const j in links) {
+        for (const j of links) {
           newGraph.addEdge(id, j);
         }
       }
@@ -114,7 +114,12 @@ export function reducer(state: State, action: Action): State {
         newGraph.removeNode(i);
       }
 
-      return state;
+      return {
+        ...state,
+        graph: newGraph,
+        titles: newTitles,
+        content: newContent,
+      };
     }
     case "fetchingContent": {
       const id = action.id;
