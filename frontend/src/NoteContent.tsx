@@ -50,17 +50,6 @@ export function NoteContent({
     }
   }, [id, status, fetchNoteContent]);
 
-  // return (
-  //   <div ref={containerReference}>
-  //     {html ? (
-  //       <div dangerouslySetInnerHTML={{ __html: html }} />
-  //     ) : (
-  //       <div>
-  //         <p>TODO: Loading</p>
-  //       </div>
-  //     )}
-  //   </div>
-  // );
   if (errors.length > 0) {
     return (
       <div ref={containerReference}>

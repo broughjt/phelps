@@ -14,38 +14,39 @@ to woff.
     font-family: NewComputerModernMath;
     src:
         local("NewComputerModernMath"),
-        url("../assets/fonts/NewCMMath-Book.woff2"),
-        url("../assets/fonts/NewCMMath-Book.woff");
+        url("../assets/fonts/NewComputerModern/NewCMMath-Book.woff2"),
+        url("../assets/fonts/NewComputerModern/NewCMMath-Book.woff");
 }
 
 @font-face {
     font-family: "NewComputerModern10";
     src:
-        local("NewComputerModern10"), url("../assets/fonts/NewCM10-Book.woff2"),
-        url("../assets/fonts/NewCM10-Book.woff");
+        local("NewComputerModern10"),
+        url("../assets/fonts/NewComputerModern/NewCM10-Book.woff2"),
+        url("../assets/fonts/NewComputerModern/NewCM10-Book.woff");
 }
 @font-face {
     font-family: "NewComputerModern10";
     src:
         local("NewComputerModern10-Bold"),
-        url("../assets/fonts/NewCM10-Bold.woff2"),
-        url("../assets/fonts/NewCM10-Bold.woff");
+        url("../assets/fonts/NewComputerModern/NewCM10-Bold.woff2"),
+        url("../assets/fonts/NewComputerModern/NewCM10-Bold.woff");
     font-weight: bold;
 }
 @font-face {
     font-family: "NewComputerModern10";
     src:
         local("NewComputerModern10-BookItalic"),
-        url("../assets/fonts/NewCM10-BookItalic.woff2"),
-        url("../assets/fonts/NewCM10-BookItalic.woff");
+        url("../assets/fonts/NewComputerModern/NewCM10-BookItalic.woff2"),
+        url("../assets/fonts/NewComputerModern/NewCM10-BookItalic.woff");
     font-style: italic;
 }
 @font-face {
     font-family: "NewComputerModern10";
     src:
         local("NewComputerModern10-BoldItalic"),
-        url("../assets/fonts/NewCM10-BoldItalic.woff2"),
-        url("../assets/fonts/NewCM10-BoldItalic.woff");
+        url("../assets/fonts/NewComputerModern/NewCM10-BoldItalic.woff2"),
+        url("../assets/fonts/NewComputerModern/NewCM10-BoldItalic.woff");
     font-weight: bold;
     font-style: italic;
 }

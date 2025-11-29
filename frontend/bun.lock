@@ -4,10 +4,7 @@
     "": {
       "name": "frontend",
       "dependencies": {
-        "@fontsource/fira-sans": "^5.2.7",
-        "@fontsource/inter": "^5.2.7",
-        "@fontsource/libertinus-serif": "^5.2.1",
-        "@fontsource/libertinus-serif-display": "^5.2.1",
+        "@fontsource/ibm-plex-serif": "^5.2.7",
         "immer": "^10.2.0",
         "react": "^19.1.1",
         "react-dom": "^19.1.1",
@@ -137,13 +134,7 @@
 
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.3.5", "", { "dependencies": { "@eslint/core": "^0.15.2", "levn": "^0.4.1" } }, "sha512-Z5kJ+wU3oA7MMIqVR9tyZRtjYPr4OC004Q4Rw7pgOKUOKkJfZ3O24nz3WYfGRpMDNmcOi3TwQOmgm7B7Tpii0w=="],
 
-    "@fontsource/fira-sans": ["@fontsource/fira-sans@5.2.7", "", {}, "sha512-5DE4AealD/VnbwdzMgnpWfCttMQBbteNiK9DCJE7cVwZEbDTPLUoFDMMvxNQ498nZc5in7Mta9c/s+3Ehh0BAg=="],
-
-    "@fontsource/inter": ["@fontsource/inter@5.2.7", "", {}, "sha512-sfE4VQglV9B05DuJ+RD2RHY42FiVTdCf/dJtVkugRVkygoDigLM4SuNcBrCeo+zoGiC/IudmVcE6QKqW7S1Gkg=="],
-
-    "@fontsource/libertinus-serif": ["@fontsource/libertinus-serif@5.2.1", "", {}, "sha512-NguzrKW1PJjePz8o+DMGFoMfoCEB57pE4szdqTxajcOwqG4Rzonv4iFu3/5luEg3ZAsvek8azonpw1PkYQDwoQ=="],
-
-    "@fontsource/libertinus-serif-display": ["@fontsource/libertinus-serif-display@5.2.1", "", {}, "sha512-yy3YFeC2TVtwGyDJbCu9qmvWUBKCTM3w5xGLqDVcTTrj46Lx0OSG+NLOZExZspkXIwo2SDCWt/ugjDvn8c82Rg=="],
+    "@fontsource/ibm-plex-serif": ["@fontsource/ibm-plex-serif@5.2.7", "", {}, "sha512-04owmc2OQQ/DAMjXjEMJc+7V4dBVmR01aIFOg4cuqS8pQ4HbvtlYs/u6+O0vCt21EMx5M/azIbgx43iKyisEOA=="],
 
     "@humanfs/core": ["@humanfs/core@0.19.1", "", {}, "sha512-5DyQ4+1JEUzejeK1JGICcideyfUbGixgS9jNgex5nqkW+cY7WZhxBigmieN5Qnw9ZosSNVC9KQKyb+GUaGyKUA=="],
 
