@@ -36,8 +36,8 @@
 
     --background-color: #fff8f0;
     --foreground-color: #222222;
-    --link-color: var(--color-cyan);
-    --link-visited-color: var(--color-magenta);
+    --link-color: var(--color-blue);
+    --link-visited-color: var(--color-blue);
 }
 
 @media (prefers-color-scheme: dark) {
