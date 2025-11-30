@@ -23,31 +23,6 @@ export function NotePage({
   errors,
   fetchNoteContent,
 }: NotePageProperties): JSX.Element {
-  // return (
-  //   <div className="layout">
-  //     <article>
-  //       <h1>{title}</h1>
-  //       <NoteContent
-  //         id={id}
-  //         status={status}
-  //         html={html}
-  //         fetchNoteContent={fetchNoteContent}
-  //       />
-  //     </article>
-  //     <aside>
-  //       <h2>Backlinks</h2>
-  //       <ul>
-  //         {Object.entries(backlinks).map(([id, title]) => (
-  //           <li key={id}>
-  //             <a href={`/note/${id}`}>{title}</a>
-  //           </li>
-  //         ))}
-  //       </ul>
-  //     </aside>
-  //     <div className="right-column"></div>
-  //   </div>
-  // );
-
   return (
     <div className="layout">
       <main>
@@ -62,11 +37,11 @@ export function NotePage({
         />
         {Object.keys(backlinks).length > 0 ? (
           <>
-            <h3>Backlinks</h3>
+            <h2>Backlinks</h2>
             <ul>
               {Object.entries(backlinks).map(([id, title]) => (
                 <li key={id}>
-                  <Link to={`note/${id}`}>{title}</Link>
+                  <Link to={`/note/${id}`}>{title}</Link>
                 </li>
               ))}
             </ul>
