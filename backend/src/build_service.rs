@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -53,7 +53,7 @@ impl DebounceEventHandler for MpscWrapper {
 
 pub struct BuildService {
     project_directory: PathBuf,
-    notes_subdirectory: PathBuf,
+    source_directories: Vec<PathBuf>,
     build_subdirectory: Arc<PathBuf>,
     package_storage: PackageStorage<
         HttpWrapper<ClientWrapper<HttpsConnector<HttpConnector>, Empty<hyper::body::Bytes>>>,
@@ -73,7 +73,7 @@ impl BuildService {
     #[allow(clippy::too_many_arguments)]
     pub fn try_build(
         project_directory: PathBuf,
-        notes_subdirectory: PathBuf,
+        source_directories: Vec<PathBuf>,
         build_subdirectory: PathBuf,
         cache_directory: PathBuf,
         data_directory: PathBuf,
@@ -111,7 +111,7 @@ impl BuildService {
         Ok(Self {
             receiver,
             project_directory,
-            notes_subdirectory,
+            source_directories,
             build_subdirectory: Arc::new(build_subdirectory),
             package_storage,
             resources,
@@ -130,23 +130,35 @@ impl BuildService {
         }
         fs::create_dir(self.build_subdirectory.as_ref()).await?;
 
-        let walker = WalkDir::new(&self.notes_subdirectory);
-        let paths = tokio::task::spawn_blocking(|| {
-            walker.into_iter().filter_map(|result| {
-                result
-                    .map(DirEntry::into_path)
-                    .ok()
-                    .filter(|path| path.extension().is_some_and(|s| s == "typ"))
-            })
+        let roots = self.source_directories.clone();
+        let project_directory = self.project_directory.clone();
+        let paths = tokio::task::spawn_blocking(move || {
+            roots
+                .into_iter()
+                .flat_map(|root| WalkDir::new(root).into_iter())
+                .filter_map(|result| {
+                    result
+                        .map(DirEntry::into_path)
+                        .ok()
+                        .filter(|path| path.extension().is_some_and(|s| s == "typ"))
+                })
+                .filter_map(|path| {
+                    VirtualPath::within_root(&path, &project_directory)
+                        .map(|virtual_path| (path, virtual_path))
+                })
+                .collect::<Vec<_>>()
         })
         .await
         .unwrap();
 
-        for path in paths {
-            let virtual_path = VirtualPath::within_root(&path, &self.project_directory).unwrap();
-            let id = FileId::new(None, virtual_path);
+        let mut seen = HashSet::new();
 
-            let _ = self.handle_create(id).await;
+        for (path, virtual_path) in paths {
+            if seen.insert(path.clone()) {
+                let id = FileId::new(None, virtual_path);
+
+                let _ = self.handle_create(id).await;
+            }
         }
 
         let _ = self.notes_service.set_build_finished().await;
@@ -189,8 +201,7 @@ impl BuildService {
                                     let id = FileId::new(None, virtual_path);
 
                                     if id.package().is_none()
-                                        && path.extension().is_some_and(|e| e == "typ")
-                                        && path.strip_prefix(&self.notes_subdirectory).is_ok() {
+                                        && self.is_source_typ_file(path) {
                                         self.handle_create(id).await;
                                     }
                                 },
@@ -201,8 +212,7 @@ impl BuildService {
                                     let virtual_path = VirtualPath::within_root(path, &self.project_directory).unwrap();
                                     let id = FileId::new(None, virtual_path);
                                     let is_source = id.package().is_none()
-                                        && path.extension().is_some_and(|e| e == "typ")
-                                        && path.strip_prefix(&self.notes_subdirectory).is_ok();
+                                        && self.is_source_typ_file(path);
 
                                     if self.graph.contains_node(id) || is_source {
                                         self.handle_modify(id).await;
@@ -343,6 +353,15 @@ impl BuildService {
         // Note, notes service handles clean up of fragment files in build
         // directory.
         let _ = self.notes_service.remove_notes(i).await;
+    }
+
+    fn is_source_typ_file(&self, path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|e| e == "typ")
+            && self
+                .source_directories
+                .iter()
+                .any(|directory| path.starts_with(directory))
     }
 }
 

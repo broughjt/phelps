@@ -22,6 +22,8 @@ pub enum Commands {
 pub struct ConfigToml {
     pub project_directory: PathBuf,
     pub default_note: Uuid,
+    #[serde(default)]
+    pub extra_directories: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -30,6 +32,7 @@ pub struct Config {
     pub cache_directory: PathBuf,
     pub project_directory: PathBuf,
     pub notes_subdirectory: PathBuf,
+    pub extra_directories: Vec<PathBuf>,
     pub build_subdirectory: PathBuf,
     pub default_note: Uuid,
 }
@@ -46,6 +49,8 @@ pub enum ConfigError {
     MissingProjectDirectory,
     #[error("notes subdirectory does not exist")]
     MissingNotesSubdirectory,
+    #[error("extra directory does not exist: {0}")]
+    MissingExtraDirectory(PathBuf),
 }
 
 impl Config {
@@ -61,10 +66,21 @@ impl Config {
         let ConfigToml {
             project_directory,
             default_note,
+            extra_directories,
         } = toml::from_str(&contents).map_err(ConfigError::ConfigParse)?;
 
         let notes_subdirectory = project_directory.join("notes");
         let build_subdirectory = project_directory.join("build");
+        let extra_directories: Vec<PathBuf> = extra_directories
+            .into_iter()
+            .map(|dir| {
+                if dir.is_absolute() {
+                    dir
+                } else {
+                    project_directory.join(dir)
+                }
+            })
+            .collect();
 
         if !project_directory.exists() {
             return Err(ConfigError::MissingProjectDirectory);
@@ -72,12 +88,18 @@ impl Config {
         if !notes_subdirectory.exists() {
             return Err(ConfigError::MissingNotesSubdirectory);
         }
+        for directory in &extra_directories {
+            if !directory.exists() {
+                return Err(ConfigError::MissingExtraDirectory(directory.clone()));
+            }
+        }
 
         Ok(Config {
             data_directory,
             cache_directory,
             project_directory,
             notes_subdirectory,
+            extra_directories,
             build_subdirectory,
             default_note,
         })

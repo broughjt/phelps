@@ -45,9 +45,12 @@ fn watch(config: Config) -> Result<(), Box<dyn Error>> {
             config.project_directory.clone(),
             config.default_note,
         );
+        let mut source_directories = Vec::with_capacity(1 + config.extra_directories.len());
+        source_directories.push(config.notes_subdirectory.clone());
+        source_directories.extend(config.extra_directories.clone());
         let build_service = BuildService::try_build(
             config.project_directory,
-            config.notes_subdirectory,
+            source_directories,
             config.build_subdirectory,
             config.cache_directory,
             config.data_directory,
