@@ -127,8 +127,8 @@ impl BuildService {
     pub async fn start(&mut self) -> Result<(), Box<dyn Error>> {
         if self.build_subdirectory.exists() {
             fs::remove_dir_all(self.build_subdirectory.as_ref()).await?;
-            fs::create_dir(self.build_subdirectory.as_ref()).await?;
         }
+        fs::create_dir(self.build_subdirectory.as_ref()).await?;
 
         let walker = WalkDir::new(&self.notes_subdirectory);
         let paths = tokio::task::spawn_blocking(|| {
