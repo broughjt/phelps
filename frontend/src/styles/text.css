@@ -1,11 +1,11 @@
 :root {
-    --fs-sm: clamp(0.8rem, 0.08vi + 0.78rem, 0.84rem);
-    --fs-base: clamp(1rem, 0.23vi + 0.94rem, 1.13rem);
-    --fs-md: clamp(1.25rem, 0.45vi + 1.14rem, 1.5rem);
-    --fs-lg: clamp(1.56rem, 0.79vi + 1.36rem, 2rem);
-    --fs-xl: clamp(1.95rem, 1.29vi + 1.63rem, 2.66rem);
-    --fs-xxl: clamp(2.44rem, 2.02vi + 1.94rem, 3.55rem);
-    --fs-xxxl: clamp(3.05rem, 3.06vi + 2.29rem, 4.73rem);
+    --fs-sm: clamp(0.8rem, 0.25vi + 0.74rem, 0.94rem);
+    --fs-base: clamp(1rem, 0.45vi + 0.89rem, 1.25rem);
+    --fs-md: clamp(1.25rem, 0.76vi + 1.06rem, 1.67rem);
+    --fs-lg: clamp(1.56rem, 1.2vi + 1.26rem, 2.22rem);
+    --fs-xl: clamp(1.95rem, 1.83vi + 1.5rem, 2.96rem);
+    --fs-xxl: clamp(2.44rem, 2.74vi + 1.76rem, 3.95rem);
+    --fs-xxxl: clamp(3.05rem, 4.02vi + 2.05rem, 5.26rem);
 }
 
 :root {
@@ -106,7 +106,33 @@ code {
 }
 
 h1 {
+    font-size: var(fs-xxxl);
+}
+
+h2 {
     font-size: var(fs-xxl);
+}
+
+h3 {
+    font-size: var(fs-xl);
+}
+
+h4 {
+    font-size: var(fs-lg);
+}
+
+h5 {
+    font-size: var(fs-md);
+}
+
+li > p {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+ul,
+ol {
+    padding-left: 1.25em;
 }
 
 /* Acceptable color hack for fletcher diagrams */

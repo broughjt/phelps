@@ -356,8 +356,7 @@ impl BuildService {
     }
 
     fn is_source_typ_file(&self, path: &Path) -> bool {
-        path.extension()
-            .is_some_and(|e| e == "typ")
+        path.extension().is_some_and(|e| e == "typ")
             && self
                 .source_directories
                 .iter()
@@ -537,6 +536,30 @@ fn find_links(html: &Html) -> Vec<Uuid> {
         .collect()
 }
 
+fn upgrade_headings(html: &mut Html) {
+    let selector = Selector::parse("h2, h3, h4, h5, h6").unwrap();
+    // TODO: Make this more efficient
+    let ids: Vec<_> = html.select(&selector).map(|element| element.id()).collect();
+
+    for id in ids {
+        let Some(mut node) = html.tree.get_mut(id) else {
+            continue;
+        };
+        let Node::Element(element) = node.value() else {
+            continue;
+        };
+
+        match element.name.local.as_ref() {
+            "h2" => element.name.local = LocalName::from("h1"),
+            "h3" => element.name.local = LocalName::from("h2"),
+            "h4" => element.name.local = LocalName::from("h3"),
+            "h5" => element.name.local = LocalName::from("h4"),
+            "h6" => element.name.local = LocalName::from("h5"),
+            _ => continue,
+        }
+    }
+}
+
 type BuildOutputs = (Vec<String>, Vec<NoteData>, HashSet<FileId>);
 
 async fn build<S>(
@@ -559,7 +582,9 @@ where
         let fragments = extract_note_fragments(&html, &document);
         let (outputs, writes) = fragments
             .into_iter()
-            .map(|(title, id, fragment)| {
+            .map(|(title, id, mut fragment)| {
+                upgrade_headings(&mut fragment);
+
                 let links = find_links(&fragment);
                 let output = NoteData { title, id, links };
 
