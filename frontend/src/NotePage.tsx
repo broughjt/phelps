@@ -39,11 +39,13 @@ export function NotePage({
           <>
             <h2>Backlinks</h2>
             <ul>
-              {Object.entries(backlinks).map(([id, title]) => (
-                <li key={id}>
-                  <Link to={`/note/${id}`}>{title}</Link>
-                </li>
-              ))}
+              {Object.entries(backlinks)
+                .toSorted((s, t) => s[1].localeCompare(t[1]))
+                .map(([id, title]) => (
+                  <li key={id}>
+                    <Link to={`/note/${id}`}>{title}</Link>
+                  </li>
+                ))}
             </ul>
           </>
         ) : (
