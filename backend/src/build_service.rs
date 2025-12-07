@@ -16,14 +16,17 @@ use hyper_util::{
     client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
-use markup5ever::{LocalName, QualName, ns};
+use markup5ever::{Attribute, LocalName, QualName, ns};
 use notify_debouncer_full::{
     DebounceEventHandler, DebounceEventResult, Debouncer, RecommendedCache, new_debouncer,
     notify::{self, RecommendedWatcher},
 };
 use parking_lot::Mutex;
 use petgraph::{Direction, prelude::DiGraphMap, visit::Bfs};
-use scraper::{ElementRef, Html, Node, Selector};
+use scraper::{
+    ElementRef, Html, Node, Selector, StrTendril,
+    node::{Element, Text},
+};
 use tokio::{fs, runtime::Handle, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 use typst::{
@@ -444,6 +447,23 @@ impl FromStr for NoteLink {
     }
 }
 
+fn clone_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
+    let mut tree = Tree::new(source.value().clone());
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((source, tree.root().id()));
+
+    while let Some((source_node, destination_id)) = queue.pop_front() {
+        let mut destination_node = tree.get_mut(destination_id).unwrap();
+
+        for source_child in source_node.children() {
+            let destination_child_id = destination_node.append(source_child.value().clone()).id();
+            queue.push_back((source_child, destination_child_id));
+        }
+    }
+
+    tree
+}
+
 fn extract_note_fragments(html: &Html, document: &HtmlDocument) -> Vec<(String, Uuid, Html)> {
     let selector =
         typst::foundations::Selector::Elem(typst::foundations::Element::of::<HeadingElem>(), None);
@@ -503,21 +523,98 @@ fn extract_note_fragments(html: &Html, document: &HtmlDocument) -> Vec<(String, 
         .collect()
 }
 
-fn clone_subtree<T: Clone>(source: NodeRef<T>) -> Tree<T> {
-    let mut tree = Tree::new(source.value().clone());
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back((source, tree.root().id()));
+fn extract_bibliography(html: &mut Html) -> HashMap<String, Tree<Node>> {
+    let selector = Selector::parse(r#"section[role="doc-bibliography"] > ul > li"#).unwrap();
+    let entries = html.select(&selector);
 
-    while let Some((source_node, destination_id)) = queue.pop_front() {
-        let mut destination_node = tree.get_mut(destination_id).unwrap();
+    let bibliography = entries
+        .map(|element| {
+            let id: String = element.attr("id").unwrap().into();
 
-        for source_child in source_node.children() {
-            let destination_child_id = destination_node.append(source_child.value().clone()).id();
-            queue.push_back((source_child, destination_child_id));
-        }
+            (id, clone_subtree(*element))
+        })
+        .collect();
+
+    let selector = Selector::parse(r#"section[role="doc-bibliography"]"#).unwrap();
+    if let Some(id) = html.select(&selector).next().map(|element| element.id()) {
+        // TODO: remove
+        // let section = ElementRef::wrap(html.tree.get(id).unwrap()).unwrap();
+        // println!("{:?}", section.value().attrs);
+
+        html.tree.get_mut(id).unwrap().detach();
     }
 
-    tree
+    bibliography
+}
+
+fn attach_bibliography(fragment: &mut Html, bibliography: &HashMap<String, Tree<Node>>) {
+    let ids: Vec<&str> = {
+        let selector = Selector::parse(r#"a[role="doc-biblioref"]"#).unwrap();
+
+        fragment
+            .select(&selector)
+            .map(|anchor| anchor.attr("href").unwrap().trim_start_matches("#"))
+            .collect()
+    };
+
+    if !ids.is_empty() {
+        let section = {
+            let section = Element::new(
+                QualName::new(None, ns!(html), LocalName::from("section")),
+                vec![
+                    Attribute {
+                        name: QualName::new(
+                            None,
+                            markup5ever::Namespace::from(""),
+                            LocalName::from("class"),
+                        ),
+                        value: StrTendril::from("hanging-indent"),
+                    },
+                    Attribute {
+                        name: QualName::new(
+                            None,
+                            markup5ever::Namespace::from(""),
+                            LocalName::from("role"),
+                        ),
+                        value: StrTendril::from("doc-bibliography"),
+                    },
+                ],
+            );
+            let mut tree = Tree::new(Node::Element(section));
+            let mut section_mut = tree.root_mut();
+
+            let h2 = Element::new(
+                QualName::new(None, ns!(html), LocalName::from("h2")),
+                Vec::new(),
+            );
+            let mut h2_mut = section_mut.append(Node::Element(h2));
+            h2_mut.append(Node::Text(Text {
+                text: "References".into(),
+            }));
+
+            let ul = Element::new(
+                QualName::new(None, ns!(html), LocalName::from("ul")),
+                Vec::new(),
+            );
+            let mut ul_mut = section_mut.append(Node::Element(ul));
+
+            for id in ids {
+                let entry = bibliography.get(id).unwrap().clone();
+
+                ul_mut.append_subtree(entry);
+            }
+
+            tree
+        };
+        let selector = Selector::parse("article").unwrap();
+        let article_id = fragment.select(&selector).next().unwrap().id();
+
+        fragment
+            .tree
+            .get_mut(article_id)
+            .unwrap()
+            .append_subtree(section);
+    }
 }
 
 fn find_links(html: &Html) -> Vec<Uuid> {
@@ -577,13 +674,16 @@ where
     S::GetPackageBuffer: Buf,
 {
     let result = tokio::task::spawn_blocking(move || {
-        let (warnings, (html, document, dependencies)) =
+        let (warnings, (mut html, document, dependencies)) =
             compile(resources, package_storage, slots, main_id)?;
+        // Need to remove bibliography section before note fragments get cloned as subtrees
+        let bibliography = extract_bibliography(&mut html);
         let fragments = extract_note_fragments(&html, &document);
         let (outputs, writes) = fragments
             .into_iter()
             .map(|(title, id, mut fragment)| {
                 upgrade_headings(&mut fragment);
+                attach_bibliography(&mut fragment, &bibliography);
 
                 let links = find_links(&fragment);
                 let output = NoteData { title, id, links };
