@@ -548,7 +548,7 @@ fn extract_bibliography(html: &mut Html) -> HashMap<String, Tree<Node>> {
 }
 
 fn attach_bibliography(fragment: &mut Html, bibliography: &HashMap<String, Tree<Node>>) {
-    let ids: Vec<&str> = {
+    let mut ids: Vec<&str> = {
         let selector = Selector::parse(r#"a[role="doc-biblioref"]"#).unwrap();
 
         fragment
@@ -556,6 +556,8 @@ fn attach_bibliography(fragment: &mut Html, bibliography: &HashMap<String, Tree<
             .map(|anchor| anchor.attr("href").unwrap().trim_start_matches("#"))
             .collect()
     };
+    ids.sort();
+    ids.dedup();
 
     if !ids.is_empty() {
         let section = {
