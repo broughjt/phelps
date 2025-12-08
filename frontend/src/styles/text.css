@@ -140,6 +140,11 @@ section[role="doc-bibliography"] ul {
     list-style-type: none;
 }
 
+span.qed {
+    float: right;
+    margin-left: 0.5em;
+}
+
 /* Acceptable color hack for fletcher diagrams */
 @media (prefers-color-scheme: dark) {
     svg.typst-frame {
