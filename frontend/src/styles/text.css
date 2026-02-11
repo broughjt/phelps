@@ -8,7 +8,8 @@
     --fs-xxxl: clamp(3.05rem, 4.02vi + 2.05rem, 5.26rem);
 }
 
-:root {
+/* ef light duo */
+/*:root {
     --color-red: #cc3333;
     --color-red-warmer: #dd1100;
     --color-red-cooler: #c04440;
@@ -36,6 +37,38 @@
 
     --background-color: #fff8f0;
     --foreground-color: #222222;
+    --link-color: var(--color-blue);
+    --link-visited-color: var(--color-blue);
+}*/
+
+:root {
+    --color-red: #d3303a;
+    --color-red-warmer: #e00033;
+    --color-red-cooler: #d51272;
+    --color-red-faint: #c24552;
+    --color-green: #217a3c;
+    --color-green-warmer: #4a7d00;
+    --color-green-cooler: #008858;
+    --color-green-faint: #61756c;
+    --color-yellow: #a45f22;
+    --color-yellow-warmer: #b6532f;
+    --color-yellow-cooler: #b65050;
+    --color-yellow-faint: #a65f6a;
+    --color-blue: #3740cf;
+    --color-blue-warmer: #4250ef;
+    --color-blue-cooler: #065fff;
+    --color-blue-faint: #4f54aa;
+    --color-magenta: #ba35af;
+    --color-magenta-warmer: #cf25aa;
+    --color-magenta-cooler: #6052cf;
+    --color-magenta-faint: #af5a80;
+    --color-cyan: #1f6fbf;
+    --color-cyan-warmer: #3f70a0;
+    --color-cyan-cooler: #1f77bb;
+    --color-cyan-faint: #406f90;
+
+    --background-color: #fgfgfg;
+    --foreground-color: #202020;
     --link-color: var(--color-blue);
     --link-visited-color: var(--color-blue);
 }
@@ -101,7 +134,7 @@ a:visted {
 }
 
 code {
-    font-family: "JuliaMono", monospace;
+    font-family: JuliaMono, monospace;
     font-size: var(--fs-sm);
     line-height: 1;
 }
